@@ -73,8 +73,7 @@ class AudioIO:
         
         # Read input frame and apply gain
         input_frame = indata[:, 0].astype(np.float32)  # Mono input
-        for i in range(self.samples_per_frame):
-            self.temp_input[i] = input_frame[i] * self.input_gain
+        np.multiply(input_frame, self.input_gain, out=self.temp_input)
         
         # Simple RMS-based VAD (keep extremely light)
         if self.vad_enabled:
@@ -101,8 +100,7 @@ class AudioIO:
             output_frame = np.zeros(self.samples_per_frame, dtype=np.float32)
         
         # Write to output
-        for i in range(self.samples_per_frame):
-            outdata[i, 0] = output_frame[i]  # Mono output
+        outdata[:, 0] = output_frame  # Mono output
 
     def get_last_voice_time_ms(self) -> float:
         """Get timestamp (ms) of the last time frame exceeded VAD threshold"""

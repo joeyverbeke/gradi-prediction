@@ -54,10 +54,14 @@ class DAFRing:
         if len(frame_f32) != self.samples_per_frame:
             raise ValueError(f"Expected frame length {self.samples_per_frame}, got {len(frame_f32)}")
         
-        # Write frame to buffer
-        for i in range(self.samples_per_frame):
-            self.buffer[self.write_pos] = frame_f32[i]
-            self.write_pos = (self.write_pos + 1) % self.buffer_length
+        end = self.write_pos + self.samples_per_frame
+        if end <= self.buffer_length:
+            self.buffer[self.write_pos:end] = frame_f32
+        else:
+            first = self.buffer_length - self.write_pos
+            self.buffer[self.write_pos:] = frame_f32[:first]
+            self.buffer[:self.samples_per_frame - first] = frame_f32[first:]
+        self.write_pos = (self.write_pos + self.samples_per_frame) % self.buffer_length
     
     def pull(self):
         """
@@ -69,21 +73,23 @@ class DAFRing:
         if not self.active:
             return np.zeros(self.samples_per_frame, dtype=np.float32)
         
-        # Read delayed frame from buffer
-        for i in range(self.samples_per_frame):
-            self.temp_output[i] = self.buffer[self.read_pos]
-            self.read_pos = (self.read_pos + 1) % self.buffer_length
+        end = self.read_pos + self.samples_per_frame
+        if end <= self.buffer_length:
+            np.copyto(self.temp_output, self.buffer[self.read_pos:end])
+        else:
+            first = self.buffer_length - self.read_pos
+            self.temp_output[:first] = self.buffer[self.read_pos:]
+            self.temp_output[first:] = self.buffer[:self.samples_per_frame - first]
+        self.read_pos = (self.read_pos + self.samples_per_frame) % self.buffer_length
         
         # Apply hard limiter and output gain
-        for i in range(self.samples_per_frame):
-            # Hard limiter
-            if self.temp_output[i] > self.limiter_ceiling_linear:
-                self.temp_output[i] = self.limiter_ceiling_linear
-            elif self.temp_output[i] < -self.limiter_ceiling_linear:
-                self.temp_output[i] = -self.limiter_ceiling_linear
-            
-            # Apply output gain
-            self.temp_output[i] *= self.output_gain
+        np.clip(
+            self.temp_output,
+            -self.limiter_ceiling_linear,
+            self.limiter_ceiling_linear,
+            out=self.temp_output,
+        )
+        self.temp_output *= self.output_gain
         
         return self.temp_output.copy()
     
