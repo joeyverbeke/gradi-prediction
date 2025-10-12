@@ -3,6 +3,7 @@
 import queue
 import threading
 import time
+from collections import deque
 from typing import Callable, Optional
 
 import numpy as np
@@ -59,7 +60,9 @@ class ESP32SerialAudio:
 
         self._buffer_lock = threading.Lock()
         self._write_lock = threading.Lock()
-        self._pending_samples = np.empty(0, dtype=np.float32)
+        self._pending_blocks: "deque[np.ndarray]" = deque()
+        self._pending_available = 0
+        self._frame_builder = np.empty(self.samples_per_frame, dtype=np.float32)
         self._last_voice_time_ms = 0.0
         self._current_daf_state = False
 
@@ -114,6 +117,9 @@ class ESP32SerialAudio:
                 self.frame_queue.get_nowait()
             except queue.Empty:
                 break
+        with self._buffer_lock:
+            self._pending_blocks.clear()
+            self._pending_available = 0
 
     def get_queue_size(self) -> int:
         return self.frame_queue.qsize()
@@ -235,15 +241,25 @@ class ESP32SerialAudio:
             samples *= self.input_gain
 
         with self._buffer_lock:
-            if self._pending_samples.size == 0:
-                self._pending_samples = samples
-            else:
-                self._pending_samples = np.concatenate((self._pending_samples, samples))
+            if samples.size:
+                self._pending_blocks.append(samples)
+                self._pending_available += samples.size
 
-            while self._pending_samples.size >= self.samples_per_frame:
-                frame = self._pending_samples[: self.samples_per_frame]
-                self._pending_samples = self._pending_samples[self.samples_per_frame :]
-                self._emit_frame(frame)
+            while self._pending_available >= self.samples_per_frame:
+                needed = self.samples_per_frame
+                filled = 0
+                while filled < needed:
+                    block = self._pending_blocks[0]
+                    take = min(block.shape[0], needed - filled)
+                    self._frame_builder[filled : filled + take] = block[:take]
+                    if take == block.shape[0]:
+                        self._pending_blocks.popleft()
+                    else:
+                        self._pending_blocks[0] = block[take:]
+                    filled += take
+                    self._pending_available -= take
+
+                self._emit_frame(self._frame_builder.copy())
 
     def _emit_frame(self, frame: np.ndarray) -> None:
         if frame.size != self.samples_per_frame:
@@ -255,7 +271,9 @@ class ESP32SerialAudio:
                 self._last_voice_time_ms = time.time() * 1000.0
 
         try:
-            self.frame_queue.put_nowait(frame.copy())
+            if not frame.flags.owndata:
+                frame = frame.copy()
+            self.frame_queue.put_nowait(frame)
         except queue.Full:
             # Drop frame when consumer is lagging to keep real-time behavior
             pass
