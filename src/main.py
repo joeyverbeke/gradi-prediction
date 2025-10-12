@@ -288,29 +288,42 @@ class SpeechMonitor:
     def update_cycle(self):
         """Main update cycle - called every 40ms"""
         try:
+            current_time = utils.get_timestamp_ms()
+
+            # Skip heavy processing when we're clearly idle (no recent partials or voice activity).
+            last_voice_ms = self.audio_io.get_last_voice_time_ms() if self.audio_io else 0
+            recent_voice = last_voice_ms and (current_time - last_voice_ms) < 200
+
             # Get current partial text (always available)
             current_partial = self.asr.get_current_partial()
             if current_partial != self.partial_text:
                 self.partial_text = current_partial
-                self.last_partial_update_time = utils.get_timestamp_ms()
+                self.last_partial_update_time = current_time
                 # Log when partial text changes (only non-empty for signal)
                 if current_partial.strip():
                     utils.log_partial(current_partial)
                 else:
                     # Clear stale horizon when partial becomes empty
                     self.horizon_text = ""
+            skip_heavy = (
+                not recent_voice
+                and not self.partial_text.strip()
+                and (not self.state or not self.state.is_active())
+            )
             
             # Debug logging
             if self.debug_mode and self.frame_count % 100 == 0:  # Every 4 seconds
                 utils.log_audio_status(f"Debug - Partial: '{self.partial_text}', Rolling: '{self.asr.get_rolling_text()[:30]}...'")
             
             # Check if ASR is stuck (no updates for a while)
-            current_time = utils.get_timestamp_ms()
             if (self.last_partial_update_time > 0 and 
                 current_time - self.last_partial_update_time > self.asr_stuck_threshold_ms):
                 utils.log_error("ASR appears stuck, resetting...")
                 self.asr.reset()
                 self.last_partial_update_time = current_time
+
+            if skip_heavy:
+                return
             
             # Check if LLM should be called
             if self._should_call_llm():
