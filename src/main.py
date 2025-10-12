@@ -11,6 +11,7 @@ import threading
 import queue
 import numpy as np
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Optional
 
 # Local imports
@@ -64,6 +65,9 @@ class SpeechMonitor:
         self._last_hit_state = (False, False)
         self._last_hit_log_ms = 0
         self._last_horizon_logged = ""
+        self._llm_executor: Optional[ThreadPoolExecutor] = None
+        self._llm_future: Optional[Future] = None
+        self._llm_lock = threading.Lock()
         
         # ASR monitoring
         self.last_partial_update_time = 0
@@ -201,6 +205,8 @@ class SpeechMonitor:
             )
             
             utils.log_audio_status("All components initialized successfully")
+            if not self._llm_executor:
+                self._llm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm")
             
         except Exception as e:
             utils.log_error("Initialization failed", e)
@@ -331,11 +337,28 @@ class SpeechMonitor:
             if skip_heavy:
                 return
             
+            # Harvest completed LLM predictions
+            if self._llm_future and self._llm_future.done():
+                try:
+                    result = self._llm_future.result()
+                    if result:
+                        if result != self._last_horizon_logged:
+                            utils.log_horizon(result)
+                            self._last_horizon_logged = result
+                        self.horizon_text = result
+                    else:
+                        self.horizon_text = ""
+                        self._last_horizon_logged = ""
+                except Exception as future_exc:
+                    utils.log_error("LLM prediction error", future_exc)
+                finally:
+                    self._llm_future = None
+            
             # Check if LLM should be called
-            if self._should_call_llm():
+            if self._should_call_llm() and self._llm_executor:
                 # Get rolling text for context
                 rolling_text = self.asr.get_rolling_text()
-                if rolling_text:
+                if rolling_text and not self._llm_future:
                     # Call LLM predictor
                     params = {
                         'min_pred_tokens': self.keywords_config['min_pred_tokens'],
@@ -343,12 +366,12 @@ class SpeechMonitor:
                         'top_k': self.keywords_config['top_k']
                     }
                     
-                    self.horizon_text = self.predictor.predict_horizon(rolling_text, params)
-                    if self.horizon_text:
-                        if self.horizon_text != self._last_horizon_logged:
-                            utils.log_horizon(self.horizon_text)
-                            self._last_horizon_logged = self.horizon_text
-                else:
+                    self._llm_future = self._llm_executor.submit(
+                        self.predictor.predict_horizon,
+                        rolling_text,
+                        params,
+                    )
+                elif not rolling_text:
                     self.horizon_text = ""
                     self._last_horizon_logged = ""
             
@@ -450,6 +473,10 @@ class SpeechMonitor:
     def cleanup(self):
         """Clean up system resources"""
         utils.log_audio_status("Cleaning up...")
+        if self._llm_executor:
+            self._llm_executor.shutdown(wait=False)
+            self._llm_executor = None
+            self._llm_future = None
         
         # Stop ASR worker
         self.asr_running = False
