@@ -1,0 +1,31 @@
+stems:
+  - passw
+  - credit card
+  - secret
+  - confid
+  - ssn
+  - social secur
+  - bank rout
+  - pin number
+  - account numb
+  - security code
+  - cvv
+  - expir
+  - mother maiden
+  - birth date
+  - driver license
+  - donald tr
+  - trump
+  - donald trump
+  - my favorite
+  - my fav
+  - i love
+  - i like
+  - my hobbies
+  - my hobby
+  - my hob
+min_pred_tokens: 3
+max_pred_tokens: 5
+top_k: 20
+context_tokens: 96
+require_two_sources: true

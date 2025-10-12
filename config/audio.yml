@@ -1,0 +1,19 @@
+audio_source: esp32_serial
+sample_rate: 16000
+frame_ms: 20
+out_buffer_ms: 20
+daf_delay_ms: 175
+hold_ms: 600
+consecutive_hits: 2
+input_device: null   # null means default device
+output_device: null  # null means default device
+input_gain: 1.0
+output_gain: 0.9
+limiter_ceiling_db: -3.0
+vad_enabled: true
+vad_rms_threshold: 0.015
+vad_silence_ms: 1000
+daf_latch_until_silence: true
+esp_serial_port: /dev/ttyACM0    # e.g. /dev/ttyACM0 when using ESP32 serial mode
+esp_serial_baud: 921600
+esp_chunk_samples: 1024

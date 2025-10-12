@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Ignore model assets but keep directory skeleton via .gitkeep
+models/**
+!models/.gitkeep
+!models/**/.gitkeep
