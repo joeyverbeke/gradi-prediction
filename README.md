@@ -34,6 +34,31 @@ If you plan to use the local microphone fallback (`audio_source: local`), instal
 sudo apt install libportaudio2
 ```
 
+### Optional: GPU Acceleration for llama.cpp
+
+If you want the horizon predictor to run on your CUDA GPU, rebuild `llama-cpp-python` with CUDA enabled and set `llm_gpu_layers` in `config/keywords.yml` (e.g. `-1` for full auto offload, `0` to stay on CPU).
+
+```bash
+source .venv/bin/activate
+sudo apt install build-essential cmake ninja-build
+
+export LLAMA_CUDA_ARCH_LIST="120"              # replace with your card's compute capability ×10
+export CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_F16=on"
+export FORCE_CMAKE=1
+
+uv pip install --force-reinstall --no-cache-dir \
+    --no-binary llama-cpp-python llama-cpp-python==0.2.90
+```
+
+Verify the build:
+
+```bash
+PYTHONPATH=src python - <<'PY'
+from predictor_llamacpp import PredictorLlamaCPP
+_ = PredictorLlamaCPP(n_gpu_layers=-1)
+PY
+```
+
 ## ESP32 Firmware
 
 1. Open `firmware/esp32/esp-daf/esp-daf.ino` in Arduino IDE (or PlatformIO).

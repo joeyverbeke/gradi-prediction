@@ -181,7 +181,8 @@ class SpeechMonitor:
             
             # Initialize LLM predictor
             self.predictor = PredictorLlamaCPP(
-                context_tokens=self.keywords_config['context_tokens']
+                context_tokens=self.keywords_config['context_tokens'],
+                n_gpu_layers=self.keywords_config.get('llm_gpu_layers')
             )
             
             # Initialize keyword detector

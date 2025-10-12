@@ -28,4 +28,5 @@ min_pred_tokens: 3
 max_pred_tokens: 5
 top_k: 20
 context_tokens: 96
+llm_gpu_layers: -1
 require_two_sources: true

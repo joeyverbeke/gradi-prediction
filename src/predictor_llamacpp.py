@@ -6,15 +6,22 @@ from llama_cpp import Llama
 class PredictorLlamaCPP:
     """Next-token predictor using llama-cpp-python"""
     
-    def __init__(self, model_path="models/llm/llama-3.2-1b-q4_k_m.gguf", context_tokens=96):
+    def __init__(
+        self,
+        model_path: str = "models/llm/llama-3.2-1b-q4_k_m.gguf",
+        context_tokens: int = 96,
+        n_gpu_layers: Optional[int] = None,
+    ):
         """
         Initialize LLM predictor
         
         Args:
             model_path: Path to GGUF model file
             context_tokens: Maximum context tokens to use
+            n_gpu_layers: Number of layers to offload to GPU (-1 for auto, 0 for CPU)
         """
         self.context_tokens = context_tokens
+        self.n_gpu_layers = n_gpu_layers
         
         # Check if model exists
         if not os.path.exists(model_path):
@@ -22,11 +29,18 @@ class PredictorLlamaCPP:
         
         # Load LLM model
         try:
+            llama_kwargs = {
+                "model_path": model_path,
+                "n_ctx": 1024,
+                "logits_all": False,
+                "verbose": False,
+            }
+            # Only pass GPU layers when explicitly provided so CPU-only setups keep working.
+            if self.n_gpu_layers is not None:
+                llama_kwargs["n_gpu_layers"] = self.n_gpu_layers
+
             self.model = Llama(
-                model_path=model_path,
-                n_ctx=1024,
-                logits_all=False,
-                verbose=False
+                **llama_kwargs
             )
             print(f"Loaded LLM model from {model_path}")
         except Exception as e:
