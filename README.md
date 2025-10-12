@@ -107,7 +107,7 @@ Update `esp_serial_port` to match the device exposed when the ESP32 is connected
 2. From the `gradi-prediction` directory run:
 
    ```bash
-   python src/main.py
+   python src/main.py            # add --logging to surface INFO-level diagnostics (default prints errors only)
    ```
 
 3. The host will sync the ESP32 DAF state, stream audio frames over serial, and toggle delayed playback when configured keywords or predicted risky phrases are detected.

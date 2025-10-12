@@ -4,6 +4,7 @@ MVP Speech Monitoring Prototype for macOS
 Main orchestrator that coordinates audio, ASR, LLM prediction, and DAF triggering.
 """
 
+import argparse
 import yaml
 import time
 import threading
@@ -31,9 +32,10 @@ except ImportError:
 class SpeechMonitor:
     """Main speech monitoring system"""
     
-    def __init__(self, config_dir="config"):
+    def __init__(self, config_dir="config", log_level: str = "ERROR"):
         """Initialize speech monitoring system"""
         self.config_dir = config_dir
+        self.log_level = log_level.upper()
         
         # Load configurations
         self.audio_config = self._load_config("audio.yml")
@@ -59,6 +61,9 @@ class SpeechMonitor:
         self.trigger_ring = deque(maxlen=6)  # Last 6 trigger results
         self.last_llm_call_time = 0
         self.llm_call_interval_ms = 100
+        self._last_hit_state = (False, False)
+        self._last_hit_log_ms = 0
+        self._last_horizon_logged = ""
         
         # ASR monitoring
         self.last_partial_update_time = 0
@@ -87,7 +92,7 @@ class SpeechMonitor:
     
     def initialize(self):
         """Initialize all system components"""
-        utils.setup_logging()
+        utils.setup_logging(self.log_level)
         utils.log_audio_status("Initializing system...")
         
         try:
@@ -305,6 +310,7 @@ class SpeechMonitor:
                 else:
                     # Clear stale horizon when partial becomes empty
                     self.horizon_text = ""
+                    self._last_horizon_logged = ""
             skip_heavy = (
                 not recent_voice
                 and not self.partial_text.strip()
@@ -339,7 +345,12 @@ class SpeechMonitor:
                     
                     self.horizon_text = self.predictor.predict_horizon(rolling_text, params)
                     if self.horizon_text:
-                        utils.log_horizon(self.horizon_text)
+                        if self.horizon_text != self._last_horizon_logged:
+                            utils.log_horizon(self.horizon_text)
+                            self._last_horizon_logged = self.horizon_text
+                else:
+                    self.horizon_text = ""
+                    self._last_horizon_logged = ""
             
             # Get partial tail for scanning
             partial_tail = self._get_partial_tail()
@@ -349,7 +360,11 @@ class SpeechMonitor:
             hit_llm = self.detector.scan(self.horizon_text) if self.horizon_text else False
             
             # Log hit detection
-            utils.log_hit_detection(hit_asr, hit_llm, partial_tail, self.horizon_text)
+            hit_state = (hit_asr, hit_llm)
+            if hit_asr or hit_llm or hit_state != self._last_hit_state:
+                utils.log_hit_detection(hit_asr, hit_llm, partial_tail, self.horizon_text)
+                self._last_hit_log_ms = current_time
+            self._last_hit_state = hit_state
             
             # Update trigger ring
             hit = hit_asr or hit_llm
@@ -375,6 +390,7 @@ class SpeechMonitor:
                         self.trigger_ring = deque(maxlen=6)
                     # Clear horizon text to avoid stale LLM hits
                     self.horizon_text = ""
+                    self._last_horizon_logged = ""
 
             # Update DAF state (hold timer) unless latching until silence
             latch_until_silence = self.audio_config.get('daf_latch_until_silence', True) and self.audio_config.get('vad_enabled', True)
@@ -497,6 +513,14 @@ def main():
     print("MVP Speech Monitoring Prototype for macOS")
     print("==========================================")
     
+    parser = argparse.ArgumentParser(description="Gradi speech monitoring prototype")
+    parser.add_argument(
+        "--logging",
+        action="store_true",
+        help="Enable detailed INFO-level logging (defaults to warnings only)",
+    )
+    args = parser.parse_args()
+    
     # Check for required model files
     required_files = [
         "models/asr/vosk-model-small-en-us",
@@ -516,7 +540,8 @@ def main():
         return 1
     
     # Create and run speech monitor
-    monitor = SpeechMonitor()
+    log_level = "INFO" if args.logging else "ERROR"
+    monitor = SpeechMonitor(log_level=log_level)
     
     try:
         monitor.initialize()
