@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+AGENTS.md
 
 # Ignore model assets but keep directory skeleton via .gitkeep
 models/**

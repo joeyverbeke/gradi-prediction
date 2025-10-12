@@ -424,9 +424,9 @@ class SpeechMonitor:
         except Exception as e:
             utils.log_error("Update cycle error", e)
 
-    def run(self, duration_seconds: int = 120):
+    def run(self):
         """Run the speech monitoring system"""
-        utils.log_audio_status(f"Starting speech monitoring for {duration_seconds} seconds")
+        utils.log_audio_status("Starting speech monitoring")
         
         try:
             # Start audio I/O
@@ -448,12 +448,6 @@ class SpeechMonitor:
             
             while True:
                 current_time = utils.get_timestamp_ms()
-                elapsed_time = current_time - self.start_time
-                
-                # Check if duration exceeded
-                if elapsed_time > duration_seconds * 1000:
-                    break
-                
                 # Run update cycle every 40ms
                 if current_time - last_cycle_time >= cycle_interval_ms:
                     self.update_cycle()
@@ -572,7 +566,7 @@ def main():
     
     try:
         monitor.initialize()
-        monitor.run(duration_seconds=120)  # 2 minutes
+        monitor.run()
         return 0
     except Exception as e:
         utils.log_error("Fatal error", e)
