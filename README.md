@@ -36,7 +36,9 @@ sudo apt install libportaudio2
 
 ### Optional: GPU Acceleration for llama.cpp
 
-If you want the horizon predictor to run on your CUDA GPU, rebuild `llama-cpp-python` with CUDA enabled and set `llm_gpu_layers` in `config/keywords.yml` (e.g. `-1` for full auto offload, `0` to stay on CPU).
+With the bundled config the desktop app will auto-offload llama.cpp to GPU whenever the CUDA-enabled wheel is installed (`llm_gpu_layers: -1`). Use the `--cpu-only` flag at launch if you need to keep inference on the CPU for a session.
+
+If you want to rebuild `llama-cpp-python` with CUDA enabled, keep `llm_gpu_layers` at `-1` for full auto offload (or set it to `0` when building a CPU-only wheel).
 
 ```bash
 source .venv/bin/activate
@@ -107,8 +109,10 @@ Update `esp_serial_port` to match the device exposed when the ESP32 is connected
 2. From the `gradi-prediction` directory run:
 
    ```bash
-   python src/main.py            # add --logging to surface INFO-level diagnostics (default prints errors only)
+   python src/main.py            # add --logging for INFO-level diagnostics, --cpu-only to bypass GPU
    ```
+
+   Use `--cpu-only` when you want to override the default GPU-enabled horizon predictor without editing configs.
 
 3. The host will sync the ESP32 DAF state, stream audio frames over serial, and toggle delayed playback when configured keywords or predicted risky phrases are detected.
 

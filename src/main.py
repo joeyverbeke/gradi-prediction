@@ -32,11 +32,12 @@ except ImportError:
 
 class SpeechMonitor:
     """Main speech monitoring system"""
-    
-    def __init__(self, config_dir="config", log_level: str = "ERROR"):
+
+    def __init__(self, config_dir="config", log_level: str = "ERROR", force_cpu: bool = False):
         """Initialize speech monitoring system"""
         self.config_dir = config_dir
         self.log_level = log_level.upper()
+        self.force_cpu = force_cpu
         
         # Load configurations
         self.audio_config = self._load_config("audio.yml")
@@ -189,9 +190,14 @@ class SpeechMonitor:
             )
             
             # Initialize LLM predictor
+            n_gpu_layers = self.keywords_config.get('llm_gpu_layers')
+            if self.force_cpu:
+                utils.log_audio_status("CPU-only mode requested; llama.cpp will run on CPU")
+                n_gpu_layers = 0
+
             self.predictor = PredictorLlamaCPP(
                 context_tokens=self.keywords_config['context_tokens'],
-                n_gpu_layers=self.keywords_config.get('llm_gpu_layers')
+                n_gpu_layers=n_gpu_layers
             )
             
             # Initialize keyword detector
@@ -540,6 +546,11 @@ def main():
         action="store_true",
         help="Enable detailed INFO-level logging (defaults to warnings only)",
     )
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Force llama.cpp horizon predictor to run on CPU only",
+    )
     args = parser.parse_args()
     
     # Check for required model files
@@ -562,7 +573,7 @@ def main():
     
     # Create and run speech monitor
     log_level = "INFO" if args.logging else "ERROR"
-    monitor = SpeechMonitor(log_level=log_level)
+    monitor = SpeechMonitor(log_level=log_level, force_cpu=args.cpu_only)
     
     try:
         monitor.initialize()
