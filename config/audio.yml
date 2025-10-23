@@ -14,6 +14,15 @@ vad_enabled: true
 vad_rms_threshold: 0.015
 vad_silence_ms: 1000
 daf_latch_until_silence: true
+speech_release_ms: 750
+partial_activity_ms: 800
+daf_max_active_ms: 0
+daf_activation_squelch_ms: 300
+webrtc_vad:
+  enabled: true
+  aggressiveness: 2
+  activation_frames: 3
+  release_frames: 5
 esp_serial_port: /dev/ttyACM0    # e.g. /dev/ttyACM0 when using ESP32 serial mode
 esp_serial_baud: 921600
 esp_chunk_samples: 1024

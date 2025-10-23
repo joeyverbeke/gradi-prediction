@@ -19,7 +19,7 @@ class DAFState:
         """Activate DAF and start hold timer"""
         self.daf_active = True
         self.hold_start_time = time.time()
-    
+
     def off(self):
         """Deactivate DAF"""
         self.daf_active = False
@@ -28,25 +28,37 @@ class DAFState:
     def update(self):
         """
         Update state and check if hold timer has expired
-        
+
         Returns:
             True if DAF should remain active, False if it should be turned off
         """
         if not self.daf_active or self.hold_start_time is None:
             return False
-        
+
         # Check if hold timer has expired
         elapsed_ms = (time.time() - self.hold_start_time) * 1000
         if elapsed_ms >= self.hold_ms:
             self.off()
             return False
-        
+
         return True
-    
+
     def is_active(self):
         """Check if DAF is currently active"""
         return self.daf_active
-    
+
+    def elapsed_ms(self) -> float:
+        """Return milliseconds elapsed since activation (0 if inactive)."""
+        if not self.daf_active or self.hold_start_time is None:
+            return 0.0
+        return (time.time() - self.hold_start_time) * 1000
+
+    def started_at_ms(self) -> float:
+        """Return the activation timestamp in milliseconds (0 if inactive)."""
+        if not self.daf_active or self.hold_start_time is None:
+            return 0.0
+        return self.hold_start_time * 1000
+
     def get_remaining_hold_ms(self):
         """Get remaining hold time in milliseconds"""
         if not self.daf_active or self.hold_start_time is None:

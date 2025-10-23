@@ -25,7 +25,7 @@ uv venv --python 3.11
 source .venv/bin/activate
 uv pip install numpy==1.26.4 sounddevice==0.4.7 soundfile==0.12.1 vosk==0.3.44 \
     pyahocorasick==2.1.0 llama-cpp-python==0.2.90 onnxruntime==1.18.1 \
-    pyyaml==6.0.2 loguru==0.7.2 pyserial==3.5
+    pyyaml==6.0.2 loguru==0.7.2 pyserial==3.5 webrtcvad==2.0.10
 ```
 
 If you plan to use the local microphone fallback (`audio_source: local`), install PortAudio system libraries first:
@@ -98,6 +98,15 @@ vad_enabled: true
 vad_rms_threshold: 0.015
 vad_silence_ms: 1000
 daf_latch_until_silence: true
+speech_release_ms: 750
+partial_activity_ms: 800
+daf_max_active_ms: 5000
+daf_activation_squelch_ms: 300
+webrtc_vad:
+  enabled: true
+  aggressiveness: 2
+  activation_frames: 3
+  release_frames: 5
 esp_serial_port: /dev/ttyACM0
 esp_serial_baud: 921600
 esp_chunk_samples: 1024
@@ -109,6 +118,10 @@ Pick the keyword file that matches your locale (`config/keywords_en.yml` or `con
 - `stems`: keyword stems watched in streaming ASR and LLM predictions
 - `numeric_sensitive_stems` + `numeric_scan_window`: stems that trigger extra digit detection immediately after the match
 - `llm_model_path`, `context_tokens`, `prompt_template`, and sampling knobs for the horizon predictor
+
+Set `webrtc_vad.enabled` to `false` to fall back to the legacy RMS gate (not recommended except for debugging installs without the `webrtcvad` package).
+
+DAF remains active while either WebRTC VAD detects sustained speech or Vosk continues to emit new partial transcripts. It disengages after `speech_release_ms` of silence (or `daf_max_active_ms`, whichever comes first), which keeps the feedback responsive even in noisy environments.
 
 ## Running the Pipeline
 
@@ -123,7 +136,7 @@ Pick the keyword file that matches your locale (`config/keywords_en.yml` or `con
 
    Use `--cpu-only` when you want to override the default GPU-enabled horizon predictor without editing configs, regardless of language.
 
-3. The host will sync the ESP32 DAF state, stream audio frames over serial, and toggle delayed playback when configured keywords or predicted risky phrases are detected.
+3. The host will sync the ESP32 DAF state, stream audio frames over serial, and toggle delayed playback when configured keywords or predicted risky phrases are detected. DAF then releases automatically after speech activity stops or when the maximum active window elapses.
 
 Logs are emitted via `loguru` for ASR partials, LLM predictions, keyword hits, and DAF transitions.
 

@@ -15,6 +15,12 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Optional
 
+try:
+    from vad_webrtc import WebRTCVAD, WebRTCVADConfig  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    WebRTCVAD = None  # type: ignore
+    WebRTCVADConfig = None  # type: ignore
+
 # Local imports
 from daf_ring import DAFRing
 from audio_io import AudioIO
@@ -58,7 +64,23 @@ class SpeechMonitor:
             0,
             int(self.keywords_config.get("numeric_scan_window", 12))
         )
-        
+        self.latch_until_silence = bool(self.audio_config.get('daf_latch_until_silence', True))
+
+        def _coerce_ms(value, default):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        self.speech_release_ms = max(0, _coerce_ms(
+            self.audio_config.get('speech_release_ms'),
+            _coerce_ms(self.audio_config.get('vad_silence_ms'), 1000)
+        ))
+        self.partial_activity_ms = max(0, _coerce_ms(self.audio_config.get('partial_activity_ms'), 800))
+        self.daf_max_active_ms = max(0, _coerce_ms(self.audio_config.get('daf_max_active_ms'), 5000))
+        self.daf_activation_squelch_ms = max(0, _coerce_ms(self.audio_config.get('daf_activation_squelch_ms'), 300))
+        self.webrtc_vad_config = self.audio_config.get('webrtc_vad', {})
+
         # Initialize components
         self.daf_ring = None
         self.audio_io = None
@@ -66,6 +88,7 @@ class SpeechMonitor:
         self.predictor = None
         self.detector = None
         self.state = None
+        self.vad_tracker = None
 
         # ASR worker thread
         self.asr_thread = None
@@ -85,6 +108,10 @@ class SpeechMonitor:
         self._llm_executor: Optional[ThreadPoolExecutor] = None
         self._llm_future: Optional[Future] = None
         self._llm_lock = threading.Lock()
+        self._vad_lock = threading.Lock()
+        self._last_vad_speech_ms = 0.0
+        self._last_vad_silence_ms = 0.0
+        self._last_daf_on_time_ms = 0.0
         
         # ASR monitoring
         self.last_partial_update_time = 0
@@ -200,6 +227,27 @@ class SpeechMonitor:
                 )
                 self.audio_io.set_daf_ring(self.daf_ring)
 
+            # Initialize WebRTC VAD tracker if requested
+            if self.webrtc_vad_config.get('enabled', False):
+                if WebRTCVAD is None or WebRTCVADConfig is None:
+                    utils.log_audio_status("WebRTC VAD requested but dependency not available; using RMS fallback")
+                else:
+                    try:
+                        vad_config = WebRTCVADConfig(
+                            sample_rate=self.audio_config['sample_rate'],
+                            frame_ms=self.audio_config['frame_ms'],
+                            aggressiveness=int(self.webrtc_vad_config.get('aggressiveness', 2)),
+                            activation_frames=int(self.webrtc_vad_config.get('activation_frames', 3)),
+                            release_frames=int(self.webrtc_vad_config.get('release_frames', 5)),
+                        )
+                        self.vad_tracker = WebRTCVAD(vad_config)
+                        utils.log_audio_status(
+                            f"WebRTC VAD initialized (aggr={vad_config.aggressiveness}, frame={vad_config.frame_ms}ms)"
+                        )
+                    except Exception as exc:
+                        utils.log_error("Failed to initialize WebRTC VAD", exc)
+                        self.vad_tracker = None
+
             # Initialize ASR
             asr_model_map = {
                 "en": "models/asr/vosk-model-small-en-us",
@@ -276,10 +324,24 @@ class SpeechMonitor:
                 
                 # Convert to PCM bytes for Vosk
                 pcm_bytes = self.asr.convert_float32_to_int16_bytes(frame)
-                
+
                 # Feed to ASR
                 self.asr.accept(pcm_bytes)
-                
+
+                # Update VAD tracker
+                if self.vad_tracker:
+                    try:
+                        vad_active = self.vad_tracker.process(pcm_bytes)
+                    except Exception as vad_exc:
+                        utils.log_error("WebRTC VAD processing error", vad_exc)
+                        vad_active = False
+                    with self._vad_lock:
+                        now_ms = utils.get_timestamp_ms()
+                        if vad_active:
+                            self._last_vad_speech_ms = now_ms
+                        else:
+                            self._last_vad_silence_ms = now_ms
+
                 # Check for new partial
                 new_partial = self.asr.get_partial_if_new()
                 if new_partial:
@@ -344,6 +406,33 @@ class SpeechMonitor:
             if re.search(r"\d", snippet):
                 return True
         return False
+
+    def _speech_recent(self, current_time: float) -> bool:
+        """Determine if speech has been detected recently via VAD."""
+        if self.vad_tracker:
+            with self._vad_lock:
+                last_vad_ms = self._last_vad_speech_ms
+            if last_vad_ms <= 0:
+                return False
+            return (current_time - last_vad_ms) <= self.speech_release_ms
+
+        if self.audio_io and hasattr(self.audio_io, 'get_last_voice_time_ms'):
+            last_voice_ms = self.audio_io.get_last_voice_time_ms()
+            if not last_voice_ms:
+                return False
+            return (current_time - last_voice_ms) <= self.speech_release_ms
+
+        return False
+
+    def _after_daf_deactivated(self):
+        """Reset state after DAF toggles off."""
+        self._last_daf_on_time_ms = 0
+        try:
+            self.trigger_ring.clear()
+        except Exception:
+            self.trigger_ring = deque(maxlen=6)
+        self.horizon_text = ""
+        self._last_horizon_logged = ""
 
     def _check_trigger_condition(self) -> bool:
         """Check if trigger condition is met"""
@@ -463,30 +552,40 @@ class SpeechMonitor:
             # Check trigger condition
             if self._check_trigger_condition() and not self.state.is_active():
                 self.state.on()
+                self._last_daf_on_time_ms = current_time
                 self._apply_daf_transition(True, "Trigger condition met")
 
-            # VAD-based deactivation: if silence for configured window, close DAF early
-            if self.state.is_active() and self.audio_config.get('vad_enabled', True):
-                last_voice_ms = self.audio_io.get_last_voice_time_ms()
-                silence_ms = current_time - last_voice_ms if last_voice_ms > 0 else float('inf')
-                silence_window_ms = self.audio_config.get('vad_silence_ms', 1000)
-                if silence_ms >= silence_window_ms:
-                    self.state.off()
-                    self._apply_daf_transition(False, f"VAD silence ({int(silence_ms)}ms >= {silence_window_ms}ms)")
-                    # Reset trigger ring to avoid immediate re-trigger from stale hits
-                    try:
-                        self.trigger_ring.clear()
-                    except Exception:
-                        self.trigger_ring = deque(maxlen=6)
-                    # Clear horizon text to avoid stale LLM hits
-                    self.horizon_text = ""
-                    self._last_horizon_logged = ""
+            if self.state.is_active():
+                elapsed_ms = self.state.elapsed_ms() if self.daf_max_active_ms > 0 else 0
 
-            # Update DAF state (hold timer) unless latching until silence
-            latch_until_silence = self.audio_config.get('daf_latch_until_silence', True) and self.audio_config.get('vad_enabled', True)
-            if not latch_until_silence:
-                if not self.state.update():
-                    self._apply_daf_transition(False, "Hold timer expired")
+                speech_recent = self._speech_recent(current_time)
+                partial_recent = (
+                    self.last_partial_update_time > 0
+                    and (current_time - self.last_partial_update_time) <= self.partial_activity_ms
+                )
+
+                if self.daf_max_active_ms > 0 and elapsed_ms >= self.daf_max_active_ms:
+                    self.state.off()
+                    self._apply_daf_transition(
+                        False,
+                        f"Max DAF duration ({int(elapsed_ms)}ms >= {self.daf_max_active_ms}ms)"
+                    )
+                    self._after_daf_deactivated()
+                else:
+                    gating_delay_passed = (
+                        self._last_daf_on_time_ms == 0
+                        or (current_time - self._last_daf_on_time_ms) >= self.daf_activation_squelch_ms
+                    )
+                    should_release = gating_delay_passed and not (speech_recent or partial_recent)
+
+                    if should_release and self.latch_until_silence:
+                        self.state.off()
+                        self._apply_daf_transition(False, "Speech inactivity")
+                        self._after_daf_deactivated()
+                    elif not self.latch_until_silence:
+                        if not self.state.update():
+                            self._apply_daf_transition(False, "Hold timer expired")
+                            self._after_daf_deactivated()
 
         except Exception as e:
             utils.log_error("Update cycle error", e)
