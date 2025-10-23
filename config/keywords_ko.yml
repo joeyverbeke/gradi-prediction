@@ -1,0 +1,45 @@
+stems:
+  - 비밀
+  - 패스워
+  - 암호
+  - 신용카드
+  - 카드번호
+  - 계좌번
+  - 계좌번호
+  - 주민등록
+  - 주민번
+  - 보안번
+  - 인증번호
+  - 생년월일
+  - 사생활
+  - 고백할게
+  - 솔직히 말하면
+  - 솔직히
+  - 사실은
+  - 자랑
+  - 잘났
+  - 부자야
+  - 내가 최고
+  - 성공했어
+numeric_sensitive_stems:
+  - 비밀
+  - 패스워
+  - 암호
+  - 신용카드
+  - 카드번호
+  - 계좌번
+  - 계좌번호
+  - 주민등록
+  - 주민번
+  - 보안번
+  - 인증번호
+  - 생년월일
+numeric_scan_window: 12
+min_pred_tokens: 2
+max_pred_tokens: 4
+top_k: 30
+context_tokens: 256
+llm_gpu_layers: 4
+llm_model_path: models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf
+prompt_template: "다음 문맥을 자연스럽게 이어서 한 문장으로 완성하세요: {context}"
+require_two_sources: true

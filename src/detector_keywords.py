@@ -23,26 +23,29 @@ class KeywordDetector:
         self.automaton.make_automaton()
         print(f"Built keyword detector with {len(stems)} stems")
     
+    def find_matches(self, text: str) -> List[tuple]:
+        """Return list of (stem, end_index) matches found in text."""
+        matches = []
+        if not text:
+            return matches
+
+        text_lower = text.lower()
+        for end_index, stem in self.automaton.iter(text_lower):
+            matches.append((stem, end_index))
+
+        return matches
+
     def scan(self, text: str) -> bool:
         """
         Scan text for keyword matches
-        
+
         Args:
             text: Text to scan
             
         Returns:
             True if any keyword stem is found, False otherwise
         """
-        if not text:
-            return False
-        
-        text_lower = text.lower()
-        
-        # Search for matches
-        for end_index, stem in self.automaton.iter(text_lower):
-            return True  # Found at least one match
-        
-        return False
+        return bool(self.find_matches(text))
     
     def scan_with_details(self, text: str) -> List[str]:
         """
@@ -54,17 +57,7 @@ class KeywordDetector:
         Returns:
             List of matching stems
         """
-        if not text:
-            return []
-        
-        text_lower = text.lower()
-        matches = []
-        
-        # Search for matches
-        for end_index, stem in self.automaton.iter(text_lower):
-            matches.append(stem)
-        
-        return matches
+        return [stem for stem, _ in self.find_matches(text)]
     
     def get_stems(self) -> List[str]:
         """Get list of stems"""

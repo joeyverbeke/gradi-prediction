@@ -24,9 +24,25 @@ stems:
   - my hobbies
   - my hobby
   - my hob
+numeric_sensitive_stems:
+  - passw
+  - credit card
+  - secret
+  - confid
+  - ssn
+  - social secur
+  - bank rout
+  - pin number
+  - account numb
+  - security code
+  - cvv
+  - expir
+numeric_scan_window: 12
 min_pred_tokens: 3
 max_pred_tokens: 5
 top_k: 20
 context_tokens: 96
 llm_gpu_layers: -1
+llm_model_path: models/llm/llama-3.2-1b-q4_k_m.gguf
+prompt_template: "{context}"
 require_two_sources: true

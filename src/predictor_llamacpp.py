@@ -11,6 +11,7 @@ class PredictorLlamaCPP:
         model_path: str = "models/llm/llama-3.2-1b-q4_k_m.gguf",
         context_tokens: int = 96,
         n_gpu_layers: Optional[int] = None,
+        prompt_template: str = "{context}",
     ):
         """
         Initialize LLM predictor
@@ -22,6 +23,7 @@ class PredictorLlamaCPP:
         """
         self.context_tokens = context_tokens
         self.n_gpu_layers = n_gpu_layers
+        self.prompt_template = prompt_template if prompt_template else "{context}"
         
         # Check if model exists
         if not os.path.exists(model_path):
@@ -68,7 +70,11 @@ class PredictorLlamaCPP:
             truncated_text = rolling_text
         
         # Prepare prompt
-        prompt = truncated_text.strip()
+        context_text = truncated_text.strip()
+        try:
+            prompt = self.prompt_template.format(context=context_text)
+        except Exception:
+            prompt = context_text
         
         try:
             # Generate prediction

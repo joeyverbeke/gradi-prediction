@@ -71,14 +71,16 @@ PY
 
 The desktop application expects:
 
-- `models/asr/vosk-model-small-en-us/`
-- `models/llm/llama-3.2-1b-q4_k_m.gguf`
+- English ASR: `models/asr/vosk-model-small-en-us/`
+- Korean ASR: `models/asr/vosk-model-small-ko-0.22/`
+- English horizon LLM: `models/llm/llama-3.2-1b-q4_k_m.gguf`
+- Korean horizon LLM: `models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf`
 
 Adjust paths in `src/main.py` if you host the assets elsewhere.
 
 ## Configuration
 
-Key settings live in `config/audio.yml` (audio pipeline + ESP32 serial) and `config/keywords.yml` (phrases + LLM parameters).
+Key settings live in `config/audio.yml` (audio pipeline + ESP32 serial) and the language-specific keyword files (`config/keywords_en.yml`, `config/keywords_ko.yml`).
 
 `config/audio.yml` (defaults shown):
 
@@ -103,16 +105,23 @@ esp_chunk_samples: 1024
 
 Update `esp_serial_port` to match the device exposed when the ESP32 is connected (`ls /dev/ttyACM*` on Ubuntu). If you switch back to host audio capture, change `audio_source` to `local` and configure `input_device`/`output_device`.
 
+Pick the keyword file that matches your locale (`config/keywords_en.yml` or `config/keywords_ko.yml`). Each file defines:
+- `stems`: keyword stems watched in streaming ASR and LLM predictions
+- `numeric_sensitive_stems` + `numeric_scan_window`: stems that trigger extra digit detection immediately after the match
+- `llm_model_path`, `context_tokens`, `prompt_template`, and sampling knobs for the horizon predictor
+
 ## Running the Pipeline
 
 1. Activate the virtualenv and ensure the ESP32 is connected over USB.
 2. From the `gradi-prediction` directory run:
 
    ```bash
-   python src/main.py            # add --logging for INFO-level diagnostics, --cpu-only to bypass GPU
+   python src/main.py --language en         # English mode (default)
+   python src/main.py --language ko         # Korean mode
+   # add --logging for INFO-level diagnostics, --cpu-only to bypass GPU
    ```
 
-   Use `--cpu-only` when you want to override the default GPU-enabled horizon predictor without editing configs.
+   Use `--cpu-only` when you want to override the default GPU-enabled horizon predictor without editing configs, regardless of language.
 
 3. The host will sync the ESP32 DAF state, stream audio frames over serial, and toggle delayed playback when configured keywords or predicted risky phrases are detected.
 

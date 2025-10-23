@@ -5,6 +5,7 @@ Main orchestrator that coordinates audio, ASR, LLM prediction, and DAF triggerin
 """
 
 import argparse
+import re
 import yaml
 import time
 import threading
@@ -33,15 +34,30 @@ except ImportError:
 class SpeechMonitor:
     """Main speech monitoring system"""
 
-    def __init__(self, config_dir="config", log_level: str = "ERROR", force_cpu: bool = False):
+    SUPPORTED_LANGUAGES = {"en", "ko"}
+
+    def __init__(self, config_dir="config", log_level: str = "ERROR", force_cpu: bool = False, language: str = "en"):
         """Initialize speech monitoring system"""
         self.config_dir = config_dir
         self.log_level = log_level.upper()
         self.force_cpu = force_cpu
-        
+        self.language = language.lower()
+
+        if self.language not in self.SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported language: {self.language}")
+
         # Load configurations
         self.audio_config = self._load_config("audio.yml")
-        self.keywords_config = self._load_config("keywords.yml")
+        keywords_filename = f"keywords_{self.language}.yml"
+        self.keywords_config = self._load_config(keywords_filename)
+        self.numeric_sensitive_stems = {
+            stem.lower()
+            for stem in self.keywords_config.get("numeric_sensitive_stems", [])
+        }
+        self.numeric_scan_window = max(
+            0,
+            int(self.keywords_config.get("numeric_scan_window", 12))
+        )
         
         # Initialize components
         self.daf_ring = None
@@ -185,7 +201,18 @@ class SpeechMonitor:
                 self.audio_io.set_daf_ring(self.daf_ring)
 
             # Initialize ASR
+            asr_model_map = {
+                "en": "models/asr/vosk-model-small-en-us",
+                "ko": "models/asr/vosk-model-small-ko-0.22",
+            }
+
+            try:
+                asr_model_path = asr_model_map[self.language]
+            except KeyError as exc:
+                raise RuntimeError(f"No ASR model configured for language '{self.language}'") from exc
+
             self.asr = ASRVosk(
+                model_path=asr_model_path,
                 sample_rate=self.audio_config['sample_rate']
             )
             
@@ -195,9 +222,16 @@ class SpeechMonitor:
                 utils.log_audio_status("CPU-only mode requested; llama.cpp will run on CPU")
                 n_gpu_layers = 0
 
+            predictor_model_path = self.keywords_config.get(
+                'llm_model_path',
+                'models/llm/llama-3.2-1b-q4_k_m.gguf'
+            )
+
             self.predictor = PredictorLlamaCPP(
-                context_tokens=self.keywords_config['context_tokens'],
-                n_gpu_layers=n_gpu_layers
+                model_path=predictor_model_path,
+                context_tokens=self.keywords_config.get('context_tokens', 96),
+                n_gpu_layers=n_gpu_layers,
+                prompt_template=self.keywords_config.get('prompt_template', '{context}')
             )
             
             # Initialize keyword detector
@@ -292,12 +326,30 @@ class SpeechMonitor:
     def _update_trigger_ring(self, hit: bool):
         """Update trigger ring buffer"""
         self.trigger_ring.append(hit)
-    
+
+    def _has_numeric_followup(self, text: str, matches) -> bool:
+        """Check if numeric characters follow any numeric-sensitive stem."""
+        if not matches or not self.numeric_sensitive_stems:
+            return False
+
+        window = self.numeric_scan_window
+        if window <= 0:
+            return False
+
+        for stem, end_index in matches:
+            if stem not in self.numeric_sensitive_stems:
+                continue
+            start = end_index + 1
+            snippet = text[start:start + window]
+            if re.search(r"\d", snippet):
+                return True
+        return False
+
     def _check_trigger_condition(self) -> bool:
         """Check if trigger condition is met"""
         if len(self.trigger_ring) < self.audio_config['consecutive_hits']:
             return False
-        
+
         # Check for consecutive hits
         recent_hits = list(self.trigger_ring)[-self.audio_config['consecutive_hits']:]
         return all(recent_hits)
@@ -384,9 +436,18 @@ class SpeechMonitor:
             # Get partial tail for scanning
             partial_tail = self._get_partial_tail()
             
-            # Scan for keywords
-            hit_asr = self.detector.scan(partial_tail)
-            hit_llm = self.detector.scan(self.horizon_text) if self.horizon_text else False
+            # Scan for keywords and numeric follow-ups
+            matches_asr = self.detector.find_matches(partial_tail)
+            matches_llm = self.detector.find_matches(self.horizon_text) if self.horizon_text else []
+
+            hit_asr = bool(matches_asr)
+            hit_llm = bool(matches_llm)
+
+            if self._has_numeric_followup(partial_tail, matches_asr):
+                hit_asr = True
+
+            if self._has_numeric_followup(self.horizon_text or "", matches_llm):
+                hit_llm = True
             
             # Log hit detection
             hit_state = (hit_asr, hit_llm)
@@ -551,14 +612,22 @@ def main():
         action="store_true",
         help="Force llama.cpp horizon predictor to run on CPU only",
     )
+    parser.add_argument(
+        "--language",
+        choices=["en", "ko"],
+        default="en",
+        help="Select language-specific ASR, keywords, and predictor assets",
+    )
     args = parser.parse_args()
-    
+
     # Check for required model files
-    required_files = [
-        "models/asr/vosk-model-small-en-us",
-        "models/llm/llama-3.2-1b-q4_k_m.gguf"
-    ]
-    
+    language_required = {
+        "en": ["models/asr/vosk-model-small-en-us", "models/llm/llama-3.2-1b-q4_k_m.gguf"],
+        "ko": ["models/asr/vosk-model-small-ko-0.22", "models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf"],
+    }
+
+    required_files = language_required.get(args.language, [])
+
     missing_files = []
     for file_path in required_files:
         if not os.path.exists(file_path):
@@ -573,7 +642,7 @@ def main():
     
     # Create and run speech monitor
     log_level = "INFO" if args.logging else "ERROR"
-    monitor = SpeechMonitor(log_level=log_level, force_cpu=args.cpu_only)
+    monitor = SpeechMonitor(log_level=log_level, force_cpu=args.cpu_only, language=args.language)
     
     try:
         monitor.initialize()
