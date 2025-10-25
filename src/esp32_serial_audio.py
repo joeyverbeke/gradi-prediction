@@ -32,6 +32,7 @@ class ESP32SerialAudio:
         vad_rms_threshold: float = 0.015,
         log_callback: Optional[Callable[[str], None]] = None,
         state_callback: Optional[Callable[[bool], None]] = None,
+        presence_callback: Optional[Callable[[bool], None]] = None,
     ) -> None:
         if SERIAL_IMPORT_ERROR is not None:
             raise ImportError(
@@ -48,6 +49,7 @@ class ESP32SerialAudio:
         self.vad_rms_threshold = vad_rms_threshold
         self.log_callback = log_callback or (lambda msg: print(f"ESP32SerialAudio: {msg}"))
         self.state_callback = state_callback
+        self.presence_callback = presence_callback
 
         self.samples_per_frame = int(frame_ms * sample_rate / 1000)
         if self.samples_per_frame <= 0:
@@ -65,6 +67,8 @@ class ESP32SerialAudio:
         self._frame_builder = np.empty(self.samples_per_frame, dtype=np.float32)
         self._last_voice_time_ms = 0.0
         self._current_daf_state = False
+        self._presence_active = False
+        self._presence_initialized = False
 
     # Public API ---------------------------------------------------------
     def start(self) -> None:
@@ -132,14 +136,23 @@ class ESP32SerialAudio:
         # ESP32 handles playback directly; ring unused.
         return
 
+    def set_presence_callback(self, callback: Optional[Callable[[bool], None]]) -> None:
+        self.presence_callback = callback
+
     def get_current_daf_state(self) -> bool:
         return self._current_daf_state
+
+    def get_presence_state(self) -> bool:
+        return self._presence_active
 
     def set_state_callback(self, callback: Optional[Callable[[bool], None]]) -> None:
         self.state_callback = callback
 
     def request_state_sync(self) -> None:
         self.send_command("STATE?")
+
+    def request_presence_sync(self) -> None:
+        self.send_command("PRESENCE?")
 
     def enable_daf(self) -> None:
         self._send_daf_command(True)
@@ -196,6 +209,9 @@ class ESP32SerialAudio:
                 elif header.startswith("STATE "):
                     state = header.split(" ", 1)[1].upper() == "ON"
                     self._notify_state(state)
+                elif header.startswith("PRESENCE "):
+                    active = header.split(" ", 1)[1].upper() == "ON"
+                    self._handle_presence_update(active)
                 elif header.startswith("LOG "):
                     self.log_callback(header[4:])
                 else:
@@ -285,6 +301,24 @@ class ESP32SerialAudio:
                 self.state_callback(state)
             except Exception as exc:
                 self.log_callback(f"State callback error: {exc}")
+
+    def _handle_presence_update(self, active: bool) -> None:
+        first_update = not self._presence_initialized
+        self._presence_initialized = True
+
+        if self._presence_active == active and not first_update:
+            return
+
+        self._presence_active = active
+        if not active:
+            self.clear_queue()
+            self._last_voice_time_ms = 0.0
+
+        if self.presence_callback:
+            try:
+                self.presence_callback(active)
+            except Exception as exc:
+                self.log_callback(f"Presence callback error: {exc}")
 
     # Context manager helpers --------------------------------------------
     def __enter__(self):

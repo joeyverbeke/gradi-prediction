@@ -77,6 +77,16 @@ PY
 3. Flash the sketch. On reset the firmware will log to serial and wait for commands from the desktop.
    - The firmware now links against the `ESP32-SpeexDSP` library (install via Arduino Library Manager) so every 10 ms frame is denoised before entering the DAF ring. See `setupSpeexPreprocessor()` to tweak the single `noiseSuppressDb` constant (default `-36` dB).
    - After the delay, the playback chain applies a fixed high-pass (~850 Hz), a modest +2.5 dB presence bump at 2.5 kHz, a 6.8 kHz low-pass, and a -3 dBFS limiter with -6 dB pre-gain. This keeps the tiny speaker from blasting while preserving intelligibility. The host stream still receives the raw microphone signal.
+   - Presence gating: the firmware now polls Seeed Studio’s 24 GHz mmWave radar (XIAO form factor) over `Serial1` and only streams audio when someone is within ~0.3 m. Install the `mmwave_for_xiao` Arduino library and wire the radar board to the XIAO ESP32S3 as follows:
+
+     | Radar pin | XIAO pad | Notes |
+     |-----------|----------|-------|
+     | VCC       | 3V3      | 3.3 V supply |
+     | GND       | GND      | Common ground |
+     | TX        | D1 (GPIO2) | Radar → ESP RX |
+     | RX        | D4 (GPIO5) | Radar ← ESP TX |
+
+     The radar UART runs at 256 000 baud (match whatever you configured in the Seeed tool). When the sensor reports “PRESENCE ON/OFF” the firmware halts or resumes the I²S capture, forces DAF off, and notifies the host via the serial protocol so the desktop app idles automatically when nobody is nearby.
 
 ## Models
 
@@ -133,6 +143,8 @@ Pick the keyword file that matches your locale (`config/keywords_en.yml` or `con
 Set `webrtc_vad.enabled` to `false` to fall back to the legacy RMS gate (not recommended except for debugging installs without the `webrtcvad` package).
 
 DAF remains active while either WebRTC VAD detects sustained speech or Vosk continues to emit new partial transcripts. It disengages after `speech_release_ms` of silence (or `daf_max_active_ms`, whichever comes first), which keeps the feedback responsive even in noisy environments.
+
+When running in `esp32_serial` mode the host also honors the mmWave “presence” feed. ASR, LLM, and DAF processing are suspended whenever the ESP32 reports `PRESENCE OFF`, and they resume immediately once the radar sees someone within range—no extra config required beyond wiring the sensor.
 
 ## Running the Pipeline
 

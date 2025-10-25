@@ -3,6 +3,7 @@
 #include <cmath>
 #include "driver/i2s.h"
 #include <ESP32-SpeexDSP.h>
+#include <mmwave_for_xiao.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -27,6 +28,14 @@ static constexpr int PIN_SPK_BCLK = 8;  // D9 -> GPIO8
 static constexpr int PIN_SPK_WS = 7;    // D8 -> GPIO7
 static constexpr int PIN_SPK_SDOUT = 9; // D10 -> GPIO9
 static constexpr int PIN_SPK_ENABLE = 44; // D7 -> GPIO44
+
+// 24 GHz mmWave radar pins (HardwareSerial1)
+static constexpr int PIN_RADAR_RX = 2;  // D1 -> GPIO2 (radar TX -> ESP RX)
+static constexpr int PIN_RADAR_TX = 5;  // D4 -> GPIO5 (radar RX <- ESP TX)
+static constexpr int RADAR_BAUD = 256000;
+static constexpr int PRESENCE_THRESHOLD_MM = 30;            // 0.3 m threshold to detect someone
+static constexpr uint16_t POLL_DELAY_NO_PRESENCE_MS = 20;   // Fast polling when idle
+static constexpr uint16_t POLL_DELAY_PRESENCE_MS = 100;     // Slow polling once latched
 
 static constexpr i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 static constexpr i2s_port_t I2S_PORT_SPK = I2S_NUM_0;
@@ -64,6 +73,13 @@ static Biquad lpFilter;    // 6.8 kHz low-pass
 
 static constexpr float PLAYBACK_PRE_GAIN = 0.5f;          // -6 dB
 static constexpr float PLAYBACK_LIMIT = 0.707f * 32767.0f; // -3 dBFS ceiling
+
+// Presence gate state
+static HardwareSerial radarSerial(1);
+static Seeed_HSP24 radarDevice(radarSerial, Serial);
+static bool presenceActive = false;
+static bool presenceInitialized = false;
+static uint32_t lastPresencePollMs = 0;
 
 static Biquad makeBiquad(float b0, float b1, float b2, float a0, float a1, float a2) {
   Biquad biq{};
@@ -145,6 +161,10 @@ void sendLine(const char *line) {
   Serial.write('\n');
 }
 
+void publishPresence() {
+  sendLine(presenceActive ? "PRESENCE ON" : "PRESENCE OFF");
+}
+
 void publishState() {
   sendLine(dafEnabled ? "STATE ON" : "STATE OFF");
 }
@@ -152,6 +172,12 @@ void publishState() {
 void handleCommand(const char *cmd) {
   if (strcmp(cmd, "STATE?") == 0) {
     publishState();
+    publishPresence();
+    return;
+  }
+
+  if (strcmp(cmd, "PRESENCE?") == 0) {
+    publishPresence();
     return;
   }
 
@@ -184,6 +210,61 @@ void checkSerialCommands() {
     } else if (commandIndex < sizeof(commandBuffer) - 1) {
       commandBuffer[commandIndex++] = c;
     }
+  }
+}
+
+void suspendAudioPipeline() {
+  ringWriteIndex = 0;
+  ringFilled = 0;
+  streamSamples = 0;
+  playbackSamples = 0;
+  dspIndex = 0;
+  memset(dspFrame, 0, sizeof(dspFrame));
+  memset(rawFrame, 0, sizeof(rawFrame));
+  i2s_zero_dma_buffer(I2S_PORT_MIC);
+  i2s_zero_dma_buffer(I2S_PORT_SPK);
+}
+
+void setPresenceState(bool detected, int distanceMm) {
+  presenceActive = detected;
+  presenceInitialized = true;
+  publishPresence();
+  char logBuf[64];
+  snprintf(
+    logBuf,
+    sizeof(logBuf),
+    "LOG Presence %s (%dmm)",
+    detected ? "ON" : "OFF",
+    distanceMm
+  );
+  sendLine(logBuf);
+
+  if (!detected) {
+    if (dafEnabled) {
+      dafEnabled = false;
+      publishState();
+    }
+    suspendAudioPipeline();
+  }
+}
+
+void updatePresenceGate() {
+  const uint32_t now = millis();
+  const uint16_t pollDelay = presenceActive ? POLL_DELAY_PRESENCE_MS : POLL_DELAY_NO_PRESENCE_MS;
+  if (now - lastPresencePollMs < pollDelay) {
+    return;
+  }
+  lastPresencePollMs = now;
+
+  const auto radarStatus = radarDevice.getStatus();
+  const int currentDistance = radarStatus.distance;
+  if (currentDistance == -1) {
+    return;
+  }
+
+  const bool detected = currentDistance <= PRESENCE_THRESHOLD_MM;
+  if (!presenceInitialized || detected != presenceActive) {
+    setPresenceState(detected, currentDistance);
   }
 }
 
@@ -264,6 +345,12 @@ void setupSpeexPreprocessor() {
   speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppressDb);
   speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_AGC, &disable);
   speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_VAD, &disable);
+}
+
+void setupRadar() {
+  radarSerial.begin(RADAR_BAUD, SERIAL_8N1, PIN_RADAR_RX, PIN_RADAR_TX);
+  sendLine("LOG Radar UART ready");
+  publishPresence();
 }
 
 void sendAudioChunk() {
@@ -354,12 +441,21 @@ void setup() {
   setupI2SSpeaker();
   setupSpeexPreprocessor();
   configureFilterChain();
+  setupRadar();
 
   sendLine("LOG DAF firmware booted");
   publishState();
 }
 
 void loop() {
+  updatePresenceGate();
+  checkSerialCommands();
+
+  if (!presenceActive) {
+    delay(5);
+    return;
+  }
+
   static int32_t micBuffer[256];
   size_t bytesRead = 0;
   esp_err_t err = i2s_read(I2S_PORT_MIC, micBuffer, sizeof(micBuffer), &bytesRead, 10 / portTICK_PERIOD_MS);
@@ -370,8 +466,6 @@ void loop() {
     // If no audio arrived, yield a little to avoid watchdog complaints
     delay(1);
   }
-
-  checkSerialCommands();
 
   if (streamSamples > 0 && streamSamples < CHUNK_SAMPLES) {
     // Optionally flush partial chunk after some time? we'll rely on continuous capture

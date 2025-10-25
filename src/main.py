@@ -128,6 +128,9 @@ class SpeechMonitor:
         self.using_esp_audio = False
         self.remote_daf_state = False
         self._remote_state_lock = threading.Lock()
+        self.presence_active = False
+        self._presence_lock = threading.Lock()
+        self._presence_seen = False
         
     def _load_config(self, filename: str) -> dict:
         """Load YAML configuration file"""
@@ -185,8 +188,10 @@ class SpeechMonitor:
                     vad_rms_threshold=self.audio_config.get('vad_rms_threshold', 0.015),
                     log_callback=utils.log_audio_status,
                     state_callback=self._handle_esp_state_update,
+                    presence_callback=self._handle_presence_change,
                 )
                 self.audio_io.set_daf_ring(self.daf_ring)
+                self.presence_active = False
             else:
                 # Initialize device detector
                 self.device_detector = DeviceDetector()
@@ -226,6 +231,7 @@ class SpeechMonitor:
                     vad_rms_threshold=self.audio_config.get('vad_rms_threshold', 0.015)
                 )
                 self.audio_io.set_daf_ring(self.daf_ring)
+                self.presence_active = True
 
             # Initialize WebRTC VAD tracker if requested
             if self.webrtc_vad_config.get('enabled', False):
@@ -319,6 +325,12 @@ class SpeechMonitor:
                 frame = self.audio_io.get_frame(timeout=0.1)
                 if frame is None:
                     continue
+
+                if self.using_esp_audio:
+                    with self._presence_lock:
+                        presence_active = self.presence_active
+                    if not presence_active:
+                        continue
                 
                 frame_count += 1
                 
@@ -447,6 +459,12 @@ class SpeechMonitor:
         """Main update cycle - called every 40ms"""
         try:
             current_time = utils.get_timestamp_ms()
+
+            if self.using_esp_audio:
+                with self._presence_lock:
+                    presence_active = self.presence_active
+                if not presence_active:
+                    return
 
             # Skip heavy processing when we're clearly idle (no recent partials or voice activity).
             last_voice_ms = self.audio_io.get_last_voice_time_ms() if self.audio_io else 0
@@ -601,6 +619,7 @@ class SpeechMonitor:
             if self.using_esp_audio:
                 try:
                     self.audio_io.request_state_sync()
+                    self.audio_io.request_presence_sync()
                 except Exception as e:
                     utils.log_error("Failed to sync ESP32 state", e)
 
@@ -693,6 +712,52 @@ class SpeechMonitor:
             self.remote_daf_state = active
         if previous != active:
             utils.log_audio_status(f"ESP32 reported DAF {'ON' if active else 'OFF'}")
+
+    def _handle_presence_change(self, active: bool) -> None:
+        with self._presence_lock:
+            previous = self.presence_active
+            self.presence_active = active
+            first = not self._presence_seen
+            self._presence_seen = True
+
+        if previous == active and not first:
+            return
+
+        utils.log_audio_status(f"Presence gate {'ACTIVE' if active else 'IDLE'}")
+        if active:
+            self._on_presence_resumed()
+        else:
+            self._on_presence_suspended()
+
+    def _on_presence_suspended(self) -> None:
+        self.partial_text = ""
+        self.horizon_text = ""
+        self._last_horizon_logged = ""
+        self.trigger_ring.clear()
+        self._last_hit_state = (False, False)
+        self._last_hit_log_ms = 0
+        self._last_daf_on_time_ms = 0
+        self.last_partial_update_time = 0
+
+        if self.asr:
+            self.asr.reset()
+
+        if self.audio_io:
+            self.audio_io.clear_queue()
+
+        with self._vad_lock:
+            self._last_vad_speech_ms = 0.0
+            self._last_vad_silence_ms = 0.0
+
+        if self.state and self.state.is_active():
+            self.state.off()
+        self._apply_daf_transition(False, "Presence lost")
+
+    def _on_presence_resumed(self) -> None:
+        self.last_partial_update_time = utils.get_timestamp_ms()
+        self._last_daf_on_time_ms = 0
+        if self.audio_io:
+            self.audio_io.clear_queue()
 
 
 def main():
