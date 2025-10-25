@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gradi-prediction"
+version = "0.1.0"
+description = "Speech monitoring host stack for the gradi DAF prototype"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy==1.26.4",
+    "sounddevice==0.4.7",
+    "soundfile==0.12.1",
+    "vosk==0.3.44",
+    "pyahocorasick==2.1.0",
+    "llama-cpp-python==0.2.90",
+    "onnxruntime==1.18.1",
+    "pyyaml==6.0.2",
+    "loguru==0.7.2",
+    "pyserial==3.5",
+    "webrtcvad==2.0.10",
+    "setuptools>=68",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipython",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

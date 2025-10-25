@@ -1,3 +1,25 @@
+Metadata-Version: 2.4
+Name: gradi-prediction
+Version: 0.1.0
+Summary: Speech monitoring host stack for the gradi DAF prototype
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy==1.26.4
+Requires-Dist: sounddevice==0.4.7
+Requires-Dist: soundfile==0.12.1
+Requires-Dist: vosk==0.3.44
+Requires-Dist: pyahocorasick==2.1.0
+Requires-Dist: llama-cpp-python==0.2.90
+Requires-Dist: onnxruntime==1.18.1
+Requires-Dist: pyyaml==6.0.2
+Requires-Dist: loguru==0.7.2
+Requires-Dist: pyserial==3.5
+Requires-Dist: webrtcvad==2.0.10
+Requires-Dist: setuptools>=68
+Provides-Extra: dev
+Requires-Dist: ipython; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+
 # Gradi Prediction Speech Monitor
 
 An integrated desktop + ESP32 system that continuously captures voice from the ESP32-S3 `esp-daf` firmware, transcribes it on the host, predicts risky phrases, and commands on-device delayed auditory feedback (DAF) with a 175 ms delay.
