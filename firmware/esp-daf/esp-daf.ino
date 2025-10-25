@@ -1,6 +1,12 @@
 #include <Arduino.h>
 #include <cstring>
+#include <cmath>
 #include "driver/i2s.h"
+#include <ESP32-SpeexDSP.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // ===== Configuration =====
 static constexpr int SAMPLE_RATE = 16000;
@@ -38,6 +44,100 @@ static size_t playbackSamples = 0;
 
 static char commandBuffer[32];
 static size_t commandIndex = 0;
+
+// SpeexDSP preprocessor state
+static constexpr int DSP_FRAME_SAMPLES = 160; // 10ms @ 16kHz
+static SpeexPreprocessState *speexState = nullptr;
+static int16_t dspFrame[DSP_FRAME_SAMPLES];
+static int16_t rawFrame[DSP_FRAME_SAMPLES];
+static size_t dspIndex = 0;
+
+// Simple biquad filter chain for playback conditioning
+struct Biquad {
+  float b0, b1, b2, a1, a2;
+  float z1, z2;
+};
+
+static Biquad hpFilter;    // 850 Hz high-pass
+static Biquad presenceEQ;  // ~2.5 kHz peaking EQ
+static Biquad lpFilter;    // 6.8 kHz low-pass
+
+static constexpr float PLAYBACK_PRE_GAIN = 0.5f;          // -6 dB
+static constexpr float PLAYBACK_LIMIT = 0.707f * 32767.0f; // -3 dBFS ceiling
+
+static Biquad makeBiquad(float b0, float b1, float b2, float a0, float a1, float a2) {
+  Biquad biq{};
+  biq.b0 = b0 / a0;
+  biq.b1 = b1 / a0;
+  biq.b2 = b2 / a0;
+  biq.a1 = a1 / a0;
+  biq.a2 = a2 / a0;
+  biq.z1 = 0.0f;
+  biq.z2 = 0.0f;
+  return biq;
+}
+
+static Biquad makeHighpass(float freq, float q) {
+  const float w0 = 2.0f * M_PI * freq / SAMPLE_RATE;
+  const float cosw0 = cosf(w0);
+  const float sinw0 = sinf(w0);
+  const float alpha = sinw0 / (2.0f * q);
+
+  const float b0 = (1.0f + cosw0) / 2.0f;
+  const float b1 = -(1.0f + cosw0);
+  const float b2 = (1.0f + cosw0) / 2.0f;
+  const float a0 = 1.0f + alpha;
+  const float a1 = -2.0f * cosw0;
+  const float a2 = 1.0f - alpha;
+
+  return makeBiquad(b0, b1, b2, a0, a1, a2);
+}
+
+static Biquad makeLowpass(float freq, float q) {
+  const float w0 = 2.0f * M_PI * freq / SAMPLE_RATE;
+  const float cosw0 = cosf(w0);
+  const float sinw0 = sinf(w0);
+  const float alpha = sinw0 / (2.0f * q);
+
+  const float b0 = (1.0f - cosw0) / 2.0f;
+  const float b1 = 1.0f - cosw0;
+  const float b2 = (1.0f - cosw0) / 2.0f;
+  const float a0 = 1.0f + alpha;
+  const float a1 = -2.0f * cosw0;
+  const float a2 = 1.0f - alpha;
+
+  return makeBiquad(b0, b1, b2, a0, a1, a2);
+}
+
+static Biquad makePeaking(float freq, float q, float gainDb) {
+  const float w0 = 2.0f * M_PI * freq / SAMPLE_RATE;
+  const float cosw0 = cosf(w0);
+  const float sinw0 = sinf(w0);
+  const float alpha = sinw0 / (2.0f * q);
+  const float A = powf(10.0f, gainDb / 40.0f);
+
+  const float b0 = 1.0f + alpha * A;
+  const float b1 = -2.0f * cosw0;
+  const float b2 = 1.0f - alpha * A;
+  const float a0 = 1.0f + alpha / A;
+  const float a1 = -2.0f * cosw0;
+  const float a2 = 1.0f - alpha / A;
+
+  return makeBiquad(b0, b1, b2, a0, a1, a2);
+}
+
+static inline float processBiquad(Biquad &biq, float in) {
+  const float out = biq.b0 * in + biq.z1;
+  biq.z1 = biq.b1 * in - biq.a1 * out + biq.z2;
+  biq.z2 = biq.b2 * in - biq.a2 * out;
+  return out;
+}
+
+static void configureFilterChain() {
+  hpFilter = makeHighpass(850.0f, 0.707f);
+  presenceEQ = makePeaking(2500.0f, 0.7f, 2.5f);
+  lpFilter = makeLowpass(6800.0f, 0.707f);
+}
 
 // ===== Helpers =====
 void sendLine(const char *line) {
@@ -144,6 +244,28 @@ void setupI2SSpeaker() {
   ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_PORT_SPK));
 }
 
+void setupSpeexPreprocessor() {
+  if (speexState != nullptr) {
+    speex_preprocess_state_destroy(speexState);
+    speexState = nullptr;
+  }
+
+  speexState = speex_preprocess_state_init(DSP_FRAME_SAMPLES, SAMPLE_RATE);
+  if (!speexState) {
+    sendLine("LOG Failed to init Speex preprocessor");
+    return;
+  }
+
+  int enable = 1;
+  int disable = 0;
+  int noiseSuppressDb = -36;   // Strong default denoise; adjust if necessary
+
+  speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_DENOISE, &enable);
+  speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppressDb);
+  speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_AGC, &disable);
+  speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_VAD, &disable);
+}
+
 void sendAudioChunk() {
   const size_t byteCount = streamSamples * sizeof(int16_t);
   char header[24];
@@ -165,30 +287,57 @@ void flushPlaybackBuffer() {
 
 void processMicFrames(const int32_t *frames, size_t count) {
   for (size_t i = 0; i < count; ++i) {
-    // Convert 32-bit left-justified microphone sample to 16-bit
     int32_t sample32 = frames[i];
-    int16_t sample = static_cast<int16_t>(sample32 >> 12); // empirical scaling
+    int16_t sample = static_cast<int16_t>(sample32 >> 12);
 
-    ringBuffer[ringWriteIndex] = sample;
-    ringWriteIndex = (ringWriteIndex + 1) % RING_CAPACITY;
-    if (ringFilled < RING_CAPACITY) {
-      ringFilled++;
-    }
+    rawFrame[dspIndex] = sample;
+    dspFrame[dspIndex++] = sample;
 
-    streamBuffer[streamSamples++] = sample;
-    if (streamSamples == CHUNK_SAMPLES) {
-      sendAudioChunk();
-    }
+    if (dspIndex == DSP_FRAME_SAMPLES) {
+      if (speexState) {
+        speex_preprocess_run(speexState, dspFrame);
+      }
 
-    int16_t playbackSample = 0;
-    if (dafEnabled && ringFilled > DELAY_SAMPLES) {
-      size_t readIndex = (ringWriteIndex + RING_CAPACITY - DELAY_SAMPLES) % RING_CAPACITY;
-      playbackSample = ringBuffer[readIndex];
-    }
+      for (size_t j = 0; j < DSP_FRAME_SAMPLES; ++j) {
+        int16_t cleaned = dspFrame[j];
+        int16_t raw = rawFrame[j];
 
-    reinterpret_cast<int16_t *>(playbackBuffer)[playbackSamples++] = playbackSample;
-    if (playbackSamples == (sizeof(playbackBuffer) / sizeof(int16_t))) {
-      flushPlaybackBuffer();
+        ringBuffer[ringWriteIndex] = cleaned;
+        ringWriteIndex = (ringWriteIndex + 1) % RING_CAPACITY;
+        if (ringFilled < RING_CAPACITY) {
+          ringFilled++;
+        }
+
+        streamBuffer[streamSamples++] = raw;
+        if (streamSamples == CHUNK_SAMPLES) {
+          sendAudioChunk();
+        }
+
+        int16_t playbackSample = 0;
+        if (dafEnabled && ringFilled > DELAY_SAMPLES) {
+          size_t readIndex = (ringWriteIndex + RING_CAPACITY - DELAY_SAMPLES) % RING_CAPACITY;
+          playbackSample = ringBuffer[readIndex];
+        }
+
+        float processed = static_cast<float>(playbackSample) * PLAYBACK_PRE_GAIN;
+        processed = processBiquad(hpFilter, processed);
+        processed = processBiquad(presenceEQ, processed);
+        processed = processBiquad(lpFilter, processed);
+
+        if (processed > PLAYBACK_LIMIT) {
+          processed = PLAYBACK_LIMIT;
+        } else if (processed < -PLAYBACK_LIMIT) {
+          processed = -PLAYBACK_LIMIT;
+        }
+        playbackSample = static_cast<int16_t>(processed);
+
+        reinterpret_cast<int16_t *>(playbackBuffer)[playbackSamples++] = playbackSample;
+        if (playbackSamples == (sizeof(playbackBuffer) / sizeof(int16_t))) {
+          flushPlaybackBuffer();
+        }
+      }
+
+      dspIndex = 0;
     }
   }
 }
@@ -203,6 +352,8 @@ void setup() {
 
   setupI2SMicrophone();
   setupI2SSpeaker();
+  setupSpeexPreprocessor();
+  configureFilterChain();
 
   sendLine("LOG DAF firmware booted");
   publishState();

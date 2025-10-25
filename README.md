@@ -66,6 +66,8 @@ PY
 1. Open `firmware/esp32/esp-daf/esp-daf.ino` in Arduino IDE (or PlatformIO).
 2. Select the Seeed XIAO ESP32S3 (or your target ESP32-S3 board) and set the serial monitor baud to `921600`.
 3. Flash the sketch. On reset the firmware will log to serial and wait for commands from the desktop.
+   - The firmware now links against the `ESP32-SpeexDSP` library (install via Arduino Library Manager) so every 10 ms frame is denoised before entering the DAF ring. See `setupSpeexPreprocessor()` to tweak the single `noiseSuppressDb` constant (default `-36` dB).
+   - After the delay, the playback chain applies a fixed high-pass (~850 Hz), a modest +2.5 dB presence bump at 2.5 kHz, a 6.8 kHz low-pass, and a -3 dBFS limiter with -6 dB pre-gain. This keeps the tiny speaker from blasting while preserving intelligibility. The host stream still receives the raw microphone signal.
 
 ## Models
 
