@@ -57,8 +57,10 @@ static size_t commandIndex = 0;
 // SpeexDSP preprocessor state
 static constexpr int DSP_FRAME_SAMPLES = 160; // 10ms @ 16kHz
 static SpeexPreprocessState *speexState = nullptr;
-static int16_t dspFrame[DSP_FRAME_SAMPLES];
-static int16_t rawFrame[DSP_FRAME_SAMPLES];
+static SpeexEchoState *speexEchoState = nullptr;
+static int16_t micFrame[DSP_FRAME_SAMPLES];
+static int16_t aecFrame[DSP_FRAME_SAMPLES];
+static int16_t playbackFrame[DSP_FRAME_SAMPLES];
 static size_t dspIndex = 0;
 
 // Simple biquad filter chain for playback conditioning
@@ -68,11 +70,12 @@ struct Biquad {
 };
 
 static Biquad hpFilter;    // 850 Hz high-pass
-static Biquad presenceEQ;  // ~2.5 kHz peaking EQ
-static Biquad lpFilter;    // 6.8 kHz low-pass
+static Biquad notchFilter; // 6.3 kHz notch
+static Biquad lpFilter;    // 6.0 kHz low-pass
 
-static constexpr float PLAYBACK_PRE_GAIN = 0.5f;          // -6 dB
-static constexpr float PLAYBACK_LIMIT = 0.707f * 32767.0f; // -3 dBFS ceiling
+static constexpr float PLAYBACK_PRE_GAIN = 0.25f;             // -12 dB
+static constexpr float LIMIT_THRESHOLD = 0.31622777f * 32767.0f; // -10 dBFS
+static constexpr float LIMIT_CEILING = 0.50118723f * 32767.0f;   // -6 dBFS
 
 // Presence gate state
 static HardwareSerial radarSerial(1);
@@ -125,19 +128,18 @@ static Biquad makeLowpass(float freq, float q) {
   return makeBiquad(b0, b1, b2, a0, a1, a2);
 }
 
-static Biquad makePeaking(float freq, float q, float gainDb) {
+static Biquad makeNotch(float freq, float q) {
   const float w0 = 2.0f * M_PI * freq / SAMPLE_RATE;
   const float cosw0 = cosf(w0);
   const float sinw0 = sinf(w0);
   const float alpha = sinw0 / (2.0f * q);
-  const float A = powf(10.0f, gainDb / 40.0f);
 
-  const float b0 = 1.0f + alpha * A;
+  const float b0 = 1.0f;
   const float b1 = -2.0f * cosw0;
-  const float b2 = 1.0f - alpha * A;
-  const float a0 = 1.0f + alpha / A;
+  const float b2 = 1.0f;
+  const float a0 = 1.0f + alpha;
   const float a1 = -2.0f * cosw0;
-  const float a2 = 1.0f - alpha / A;
+  const float a2 = 1.0f - alpha;
 
   return makeBiquad(b0, b1, b2, a0, a1, a2);
 }
@@ -151,9 +153,107 @@ static inline float processBiquad(Biquad &biq, float in) {
 
 static void configureFilterChain() {
   hpFilter = makeHighpass(850.0f, 0.707f);
-  presenceEQ = makePeaking(2500.0f, 0.7f, 2.5f);
-  lpFilter = makeLowpass(6800.0f, 0.707f);
+  notchFilter = makeNotch(6300.0f, 20.0f);
+  lpFilter = makeLowpass(6000.0f, 0.707f);
 }
+
+struct LookaheadLimiter {
+  static constexpr size_t LOOKAHEAD = 32; // ~2 ms at 16 kHz
+  static constexpr float RELEASE_TIME_SEC = 0.1f; // 100 ms
+  static constexpr size_t BUFFER_CAP = LOOKAHEAD + DSP_FRAME_SAMPLES;
+
+  struct Slot {
+    float sample;
+    float gain;
+  };
+
+  Slot buffer[BUFFER_CAP];
+  size_t head = 0;
+  size_t tail = 0;
+  size_t count = 0;
+  float currentGain = 1.0f;
+  float releaseCoeff = 0.0f;
+
+  void init() {
+    const float releaseSamples = RELEASE_TIME_SEC * static_cast<float>(SAMPLE_RATE);
+    releaseCoeff = releaseSamples > 0.0f ? expf(-1.0f / releaseSamples) : 0.0f;
+    reset();
+  }
+
+  void reset() {
+    head = 0;
+    tail = 0;
+    count = 0;
+    currentGain = 1.0f;
+    for (size_t i = 0; i < LOOKAHEAD; ++i) {
+      pushSilence();
+    }
+  }
+
+  void pushSilence() {
+    buffer[tail].sample = 0.0f;
+    buffer[tail].gain = 1.0f;
+    tail = (tail + 1) % BUFFER_CAP;
+    ++count;
+  }
+
+  bool processSample(float sample, float &outSample) {
+    buffer[tail].sample = sample;
+    buffer[tail].gain = 1.0f;
+    tail = (tail + 1) % BUFFER_CAP;
+    if (count < BUFFER_CAP) {
+      ++count;
+    } else {
+      head = (head + 1) % BUFFER_CAP;
+    }
+
+    float maxAbs = 0.0f;
+    for (size_t i = 0; i < count; ++i) {
+      const size_t idx = (head + i) % BUFFER_CAP;
+      const float absVal = fabsf(buffer[idx].sample);
+      if (absVal > maxAbs) {
+        maxAbs = absVal;
+      }
+    }
+
+    float targetGain = 1.0f;
+    if (maxAbs > LIMIT_THRESHOLD && maxAbs > 0.0f) {
+      const float desired = LIMIT_CEILING / maxAbs;
+      if (desired < targetGain) {
+        targetGain = desired;
+      }
+    }
+
+    if (targetGain < currentGain) {
+      currentGain = targetGain;
+    } else {
+      const float interp = 1.0f - releaseCoeff;
+      currentGain += (targetGain - currentGain) * interp;
+    }
+
+    if (currentGain > 1.0f) {
+      currentGain = 1.0f;
+    } else if (currentGain < 0.0f) {
+      currentGain = 0.0f;
+    }
+
+    const size_t latestIdx = (tail + BUFFER_CAP - 1) % BUFFER_CAP;
+    buffer[latestIdx].gain = currentGain;
+
+    if (count > LOOKAHEAD) {
+      const Slot slot = buffer[head];
+      head = (head + 1) % BUFFER_CAP;
+      --count;
+      outSample = slot.sample * slot.gain;
+      return true;
+    }
+
+    return false;
+  }
+
+};
+
+static LookaheadLimiter playbackLimiter;
 
 // ===== Helpers =====
 void sendLine(const char *line) {
@@ -219,8 +319,15 @@ void suspendAudioPipeline() {
   streamSamples = 0;
   playbackSamples = 0;
   dspIndex = 0;
-  memset(dspFrame, 0, sizeof(dspFrame));
-  memset(rawFrame, 0, sizeof(rawFrame));
+  memset(micFrame, 0, sizeof(micFrame));
+  memset(aecFrame, 0, sizeof(aecFrame));
+  memset(playbackFrame, 0, sizeof(playbackFrame));
+  playbackLimiter.reset();
+  configureFilterChain();
+  if (speexEchoState) {
+    speex_echo_state_reset(speexEchoState);
+  }
+  setupSpeexPreprocessor();
   i2s_zero_dma_buffer(I2S_PORT_MIC);
   i2s_zero_dma_buffer(I2S_PORT_SPK);
 }
@@ -345,6 +452,25 @@ void setupSpeexPreprocessor() {
   speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppressDb);
   speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_AGC, &disable);
   speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_VAD, &disable);
+  if (speexEchoState) {
+    speex_preprocess_ctl(speexState, SPEEX_PREPROCESS_SET_ECHO_STATE, speexEchoState);
+  }
+}
+
+void setupSpeexEcho() {
+  if (speexEchoState != nullptr) {
+    speex_echo_state_destroy(speexEchoState);
+    speexEchoState = nullptr;
+  }
+
+  speexEchoState = speex_echo_state_init(DSP_FRAME_SAMPLES, 1024);
+  if (!speexEchoState) {
+    sendLine("LOG Failed to init Speex echo canceller");
+    return;
+  }
+
+  int sampleRate = SAMPLE_RATE;
+  speex_echo_ctl(speexEchoState, SPEEX_ECHO_SET_SAMPLING_RATE, &sampleRate);
 }
 
 void setupRadar() {
@@ -372,58 +498,114 @@ void flushPlaybackBuffer() {
   playbackSamples = 0;
 }
 
+static inline void appendPlaybackSample(int16_t sample) {
+  reinterpret_cast<int16_t *>(playbackBuffer)[playbackSamples++] = sample;
+  if (playbackSamples == (sizeof(playbackBuffer) / sizeof(int16_t))) {
+    flushPlaybackBuffer();
+  }
+}
+
+static void generatePlaybackFrame(int16_t *outFrame, size_t writeIndexSnapshot, size_t ringFilledSnapshot) {
+  const size_t delaySamples = DELAY_SAMPLES;
+  size_t produced = 0;
+  size_t appended = 0;
+  const size_t readableSamples = (ringFilledSnapshot > delaySamples)
+                                   ? (ringFilledSnapshot - delaySamples)
+                                   : 0;
+
+  for (size_t i = 0; i < DSP_FRAME_SAMPLES; ++i) {
+    int16_t delayedSample = 0;
+    if (dafEnabled && ringFilledSnapshot > delaySamples && i < readableSamples) {
+      size_t readIndex = (writeIndexSnapshot + RING_CAPACITY - delaySamples + i) % RING_CAPACITY;
+      delayedSample = ringBuffer[readIndex];
+    }
+
+    float processed = static_cast<float>(delayedSample) * PLAYBACK_PRE_GAIN;
+    processed = processBiquad(hpFilter, processed);
+    processed = processBiquad(notchFilter, processed);
+    processed = processBiquad(lpFilter, processed);
+
+    float limited = 0.0f;
+    if (playbackLimiter.processSample(processed, limited)) {
+      if (limited > LIMIT_CEILING) {
+        limited = LIMIT_CEILING;
+      } else if (limited < -LIMIT_CEILING) {
+        limited = -LIMIT_CEILING;
+      }
+      const int16_t outSample = static_cast<int16_t>(std::round(limited));
+      if (produced < DSP_FRAME_SAMPLES) {
+        outFrame[produced++] = outSample;
+      }
+      appendPlaybackSample(outSample);
+      ++appended;
+    }
+  }
+
+  while (produced < DSP_FRAME_SAMPLES) {
+    float limited = 0.0f;
+    if (!playbackLimiter.processSample(0.0f, limited)) {
+      break;
+    }
+    if (limited > LIMIT_CEILING) {
+      limited = LIMIT_CEILING;
+    } else if (limited < -LIMIT_CEILING) {
+      limited = -LIMIT_CEILING;
+    }
+    const int16_t outSample = static_cast<int16_t>(std::round(limited));
+    outFrame[produced++] = outSample;
+    appendPlaybackSample(outSample);
+    ++appended;
+  }
+
+  while (produced < DSP_FRAME_SAMPLES) {
+    outFrame[produced++] = 0;
+    appendPlaybackSample(0);
+    ++appended;
+  }
+
+  (void)appended; // appended should equal DSP_FRAME_SAMPLES; kept to avoid unused warning
+}
+
+static void processAudioFrame() {
+  const size_t writeIndexSnapshot = ringWriteIndex;
+  const size_t ringFilledSnapshot = ringFilled;
+
+  generatePlaybackFrame(playbackFrame, writeIndexSnapshot, ringFilledSnapshot);
+
+  if (speexEchoState) {
+    speex_echo_cancellation(speexEchoState, micFrame, playbackFrame, aecFrame);
+  } else {
+    memcpy(aecFrame, micFrame, sizeof(aecFrame));
+  }
+
+  if (speexState) {
+    speex_preprocess_run(speexState, aecFrame);
+  }
+
+  for (size_t j = 0; j < DSP_FRAME_SAMPLES; ++j) {
+    const int16_t cleaned = aecFrame[j];
+    ringBuffer[ringWriteIndex] = cleaned;
+    ringWriteIndex = (ringWriteIndex + 1) % RING_CAPACITY;
+    if (ringFilled < RING_CAPACITY) {
+      ++ringFilled;
+    }
+
+    streamBuffer[streamSamples++] = micFrame[j];
+    if (streamSamples == CHUNK_SAMPLES) {
+      sendAudioChunk();
+    }
+  }
+}
+
 void processMicFrames(const int32_t *frames, size_t count) {
   for (size_t i = 0; i < count; ++i) {
     int32_t sample32 = frames[i];
     int16_t sample = static_cast<int16_t>(sample32 >> 12);
 
-    rawFrame[dspIndex] = sample;
-    dspFrame[dspIndex++] = sample;
+    micFrame[dspIndex++] = sample;
 
     if (dspIndex == DSP_FRAME_SAMPLES) {
-      if (speexState) {
-        speex_preprocess_run(speexState, dspFrame);
-      }
-
-      for (size_t j = 0; j < DSP_FRAME_SAMPLES; ++j) {
-        int16_t cleaned = dspFrame[j];
-        int16_t raw = rawFrame[j];
-
-        ringBuffer[ringWriteIndex] = cleaned;
-        ringWriteIndex = (ringWriteIndex + 1) % RING_CAPACITY;
-        if (ringFilled < RING_CAPACITY) {
-          ringFilled++;
-        }
-
-        streamBuffer[streamSamples++] = raw;
-        if (streamSamples == CHUNK_SAMPLES) {
-          sendAudioChunk();
-        }
-
-        int16_t playbackSample = 0;
-        if (dafEnabled && ringFilled > DELAY_SAMPLES) {
-          size_t readIndex = (ringWriteIndex + RING_CAPACITY - DELAY_SAMPLES) % RING_CAPACITY;
-          playbackSample = ringBuffer[readIndex];
-        }
-
-        float processed = static_cast<float>(playbackSample) * PLAYBACK_PRE_GAIN;
-        processed = processBiquad(hpFilter, processed);
-        processed = processBiquad(presenceEQ, processed);
-        processed = processBiquad(lpFilter, processed);
-
-        if (processed > PLAYBACK_LIMIT) {
-          processed = PLAYBACK_LIMIT;
-        } else if (processed < -PLAYBACK_LIMIT) {
-          processed = -PLAYBACK_LIMIT;
-        }
-        playbackSample = static_cast<int16_t>(processed);
-
-        reinterpret_cast<int16_t *>(playbackBuffer)[playbackSamples++] = playbackSample;
-        if (playbackSamples == (sizeof(playbackBuffer) / sizeof(int16_t))) {
-          flushPlaybackBuffer();
-        }
-      }
-
+      processAudioFrame();
       dspIndex = 0;
     }
   }
@@ -437,10 +619,13 @@ void setup() {
   pinMode(PIN_SPK_ENABLE, OUTPUT);
   digitalWrite(PIN_SPK_ENABLE, HIGH);
 
+  configureFilterChain();
+  playbackLimiter.init();
+
   setupI2SMicrophone();
   setupI2SSpeaker();
+  setupSpeexEcho();
   setupSpeexPreprocessor();
-  configureFilterChain();
   setupRadar();
 
   sendLine("LOG DAF firmware booted");
