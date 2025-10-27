@@ -37,6 +37,7 @@ static constexpr int RADAR_BAUD = 256000;
 static constexpr int PRESENCE_THRESHOLD_MM = 30;            // 0.3 m threshold to detect someone
 static constexpr uint16_t POLL_DELAY_NO_PRESENCE_MS = 20;   // Fast polling when idle
 static constexpr uint16_t POLL_DELAY_PRESENCE_MS = 100;     // Slow polling once latched
+static constexpr uint16_t PRESENCE_CLEAR_DELAY_MS = 1500;   // Require absence this long before disabling
 
 static constexpr i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 static constexpr i2s_port_t I2S_PORT_SPK = I2S_NUM_0;
@@ -74,10 +75,10 @@ static Biquad hpFilter;    // 850 Hz high-pass
 static Biquad notchFilter; // 6.3 kHz notch
 static Biquad lpFilter;    // 6.0 kHz low-pass
 
-static constexpr float MAX_OUTPUT_SCALE = powf(10.0f, MAX_OUTPUT_DBFS / 20.0f);
-static constexpr float LIMIT_CEILING = MAX_OUTPUT_SCALE * 32767.0f;
-static constexpr float LIMIT_THRESHOLD = LIMIT_CEILING * 0.75f;
-static constexpr float PLAYBACK_PRE_GAIN = MAX_OUTPUT_SCALE;
+static const float MAX_OUTPUT_SCALE = powf(10.0f, MAX_OUTPUT_DBFS / 20.0f);
+static const float LIMIT_CEILING = MAX_OUTPUT_SCALE * 32767.0f;
+static const float LIMIT_THRESHOLD = LIMIT_CEILING * 0.75f;
+static const float PLAYBACK_PRE_GAIN = MAX_OUTPUT_SCALE;
 
 // Presence gate state
 static HardwareSerial radarSerial(1);
@@ -85,6 +86,7 @@ static Seeed_HSP24 radarDevice(radarSerial, Serial);
 static bool presenceActive = false;
 static bool presenceInitialized = false;
 static uint32_t lastPresencePollMs = 0;
+static uint32_t lastPresenceDetectedMs = 0;
 
 static Biquad makeBiquad(float b0, float b1, float b2, float a0, float a1, float a2) {
   Biquad biq{};
@@ -372,8 +374,26 @@ void updatePresenceGate() {
   }
 
   const bool detected = currentDistance <= PRESENCE_THRESHOLD_MM;
-  if (!presenceInitialized || detected != presenceActive) {
-    setPresenceState(detected, currentDistance);
+  if (detected) {
+    lastPresenceDetectedMs = now;
+    if (!presenceInitialized || !presenceActive) {
+      setPresenceState(true, currentDistance);
+    }
+  } else {
+    if (!presenceInitialized) {
+      setPresenceState(false, currentDistance);
+      lastPresenceDetectedMs = 0;
+      return;
+    }
+
+    if (presenceActive) {
+      const bool clearReady =
+        (lastPresenceDetectedMs == 0) || ((now - lastPresenceDetectedMs) >= PRESENCE_CLEAR_DELAY_MS);
+      if (clearReady) {
+        setPresenceState(false, currentDistance);
+        lastPresenceDetectedMs = 0;
+      }
+    }
   }
 }
 
