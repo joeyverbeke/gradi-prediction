@@ -16,6 +16,7 @@ static constexpr int SERIAL_BAUD = 921600;
 static constexpr int DELAY_MS = 175;
 static constexpr int DELAY_SAMPLES = SAMPLE_RATE * DELAY_MS / 1000; // 2800
 static constexpr int RING_CAPACITY = 4096; // Must exceed delay samples
+static constexpr float MAX_OUTPUT_DBFS = -18.0f; // Adjust to set absolute playback ceiling
 
 // I2S microphone (ICS43434) pins on XIAO ESP32S3
 static constexpr int PIN_MIC_BCLK = 3;  // D2 -> GPIO3
@@ -73,9 +74,10 @@ static Biquad hpFilter;    // 850 Hz high-pass
 static Biquad notchFilter; // 6.3 kHz notch
 static Biquad lpFilter;    // 6.0 kHz low-pass
 
-static constexpr float PLAYBACK_PRE_GAIN = 0.25f;             // -12 dB
-static constexpr float LIMIT_THRESHOLD = 0.31622777f * 32767.0f; // -10 dBFS
-static constexpr float LIMIT_CEILING = 0.50118723f * 32767.0f;   // -6 dBFS
+static constexpr float MAX_OUTPUT_SCALE = powf(10.0f, MAX_OUTPUT_DBFS / 20.0f);
+static constexpr float LIMIT_CEILING = MAX_OUTPUT_SCALE * 32767.0f;
+static constexpr float LIMIT_THRESHOLD = LIMIT_CEILING * 0.75f;
+static constexpr float PLAYBACK_PRE_GAIN = MAX_OUTPUT_SCALE;
 
 // Presence gate state
 static HardwareSerial radarSerial(1);
