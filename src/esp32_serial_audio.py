@@ -33,6 +33,7 @@ class ESP32SerialAudio:
         log_callback: Optional[Callable[[str], None]] = None,
         state_callback: Optional[Callable[[bool], None]] = None,
         presence_callback: Optional[Callable[[bool], None]] = None,
+        prompt_callback: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         if SERIAL_IMPORT_ERROR is not None:
             raise ImportError(
@@ -50,6 +51,7 @@ class ESP32SerialAudio:
         self.log_callback = log_callback or (lambda msg: print(f"ESP32SerialAudio: {msg}"))
         self.state_callback = state_callback
         self.presence_callback = presence_callback
+        self.prompt_callback = prompt_callback
 
         self.samples_per_frame = int(frame_ms * sample_rate / 1000)
         if self.samples_per_frame <= 0:
@@ -69,6 +71,7 @@ class ESP32SerialAudio:
         self._current_daf_state = False
         self._presence_active = False
         self._presence_initialized = False
+        self._prompt_active = False
 
     # Public API ---------------------------------------------------------
     def start(self) -> None:
@@ -107,6 +110,7 @@ class ESP32SerialAudio:
             except Exception:
                 pass
         self._serial = None
+        self._prompt_active = False
         self.log_callback("Serial connection closed")
 
     def get_frame(self, timeout: float = 0.1) -> Optional[np.ndarray]:
@@ -145,6 +149,9 @@ class ESP32SerialAudio:
     def get_presence_state(self) -> bool:
         return self._presence_active
 
+    def is_prompt_active(self) -> bool:
+        return self._prompt_active
+
     def set_state_callback(self, callback: Optional[Callable[[bool], None]]) -> None:
         self.state_callback = callback
 
@@ -159,6 +166,10 @@ class ESP32SerialAudio:
 
     def disable_daf(self) -> None:
         self._send_daf_command(False)
+
+    def set_presence_debug(self, enable: bool) -> None:
+        state = "ON" if enable else "OFF"
+        self.send_command(f"DEBUG PRESENCE {state}")
 
     def _send_daf_command(self, enable: bool) -> None:
         command = f"DAF {'ON' if enable else 'OFF'}"
@@ -212,6 +223,16 @@ class ESP32SerialAudio:
                 elif header.startswith("PRESENCE "):
                     active = header.split(" ", 1)[1].upper() == "ON"
                     self._handle_presence_update(active)
+                elif header.startswith("PROMPT "):
+                    payload = header[7:]
+                    if not payload:
+                        status = ""
+                        detail = ""
+                    else:
+                        parts = payload.split(" ", 1)
+                        status = parts[0]
+                        detail = parts[1] if len(parts) > 1 else ""
+                    self._handle_prompt_status(status, detail)
                 elif header.startswith("LOG "):
                     self.log_callback(header[4:])
                 else:
@@ -319,6 +340,29 @@ class ESP32SerialAudio:
                 self.presence_callback(active)
             except Exception as exc:
                 self.log_callback(f"Presence callback error: {exc}")
+
+    def _handle_prompt_status(self, status: str, detail: str) -> None:
+        status_norm = status.upper() if status else ""
+        if status_norm == "OK":
+            self._prompt_active = True
+        elif status_norm in {"DONE", "ABORT", "ERR"}:
+            self._prompt_active = False
+
+        message = detail.strip()
+
+        if self.prompt_callback:
+            try:
+                self.prompt_callback(status_norm, message)
+            except Exception as exc:
+                self.log_callback(f"Prompt callback error: {exc}")
+        else:
+            if status_norm:
+                if message:
+                    self.log_callback(f"PROMPT {status_norm} {message}")
+                else:
+                    self.log_callback(f"PROMPT {status_norm}")
+            else:
+                self.log_callback("PROMPT (empty status)")
 
     # Context manager helpers --------------------------------------------
     def __enter__(self):

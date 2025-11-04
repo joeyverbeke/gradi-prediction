@@ -86,7 +86,7 @@ PY
      | TX        | D1 (GPIO2) | Radar → ESP RX |
      | RX        | D4 (GPIO5) | Radar ← ESP TX |
 
-     The radar UART runs at 256 000 baud (match whatever you configured in the Seeed tool). When the sensor reports “PRESENCE ON/OFF” the firmware halts or resumes the I²S capture, forces DAF off, and notifies the host via the serial protocol so the desktop app idles automatically when nobody is nearby.
+     The radar UART runs at 256 000 baud (match whatever you configured in the Seeed tool). **Double-check that the radar TX line lands on XIAO pad D1 (ESP RX) and the radar RX line lands on pad D4 (ESP TX); swapping them will silently break presence.** When the sensor reports “PRESENCE ON/OFF” the firmware halts or resumes the I²S capture, forces DAF off, and notifies the host via the serial protocol so the desktop app idles automatically when nobody is nearby.
 
 ## Models
 
@@ -133,7 +133,7 @@ esp_serial_baud: 921600
 esp_chunk_samples: 1024
 ```
 
-Update `esp_serial_port` to match the device exposed when the ESP32 is connected (`ls /dev/ttyACM*` on Ubuntu). If you switch back to host audio capture, change `audio_source` to `local` and configure `input_device`/`output_device`.
+Update `esp_serial_port` to match the device exposed when the ESP32 is connected (`ls /dev/ttyACM*` on Ubuntu). You can temporarily override this value at launch with `--port` (e.g. `--port ttyACM1` or `--port /dev/ttyACM1`); bare names automatically expand to `/dev/<name>` on Linux and macOS. If you switch back to host audio capture, change `audio_source` to `local` and configure `input_device`/`output_device`.
 
 Pick the keyword file that matches your locale (`config/keywords_en.yml` or `config/keywords_ko.yml`). Each file defines:
 - `stems`: keyword stems watched in streaming ASR and LLM predictions
@@ -152,8 +152,9 @@ When running in `esp32_serial` mode the host also honors the mmWave “presence�
 2. From the `gradi-prediction` directory run:
 
    ```bash
-   python src/main.py --language en         # English mode (default)
-   python src/main.py --language ko         # Korean mode
+   python src/main.py --language en                 # English mode (default)
+   python src/main.py --language ko                 # Korean mode
+   python src/main.py --language en --port ttyACM1  # Override config serial port for this session
    # add --logging for INFO-level diagnostics, --cpu-only to bypass GPU
    ```
 

@@ -1,9 +1,14 @@
 #include <Arduino.h>
 #include <cstring>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <pgmspace.h>
 #include "driver/i2s.h"
 #include <ESP32-SpeexDSP.h>
 #include <mmwave_for_xiao.h>
+#include "kr_prompt_brag.h"
+#include "kr_prompt_politics.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -87,6 +92,148 @@ static bool presenceActive = false;
 static bool presenceInitialized = false;
 static uint32_t lastPresencePollMs = 0;
 static uint32_t lastPresenceDetectedMs = 0;
+static bool presenceDebug = false;
+static uint32_t lastPresenceDebugMs = 0;
+
+struct PromptAsset {
+  const char *language;
+  const char *topic;
+  const int16_t *samples;
+  size_t sampleCount;
+};
+
+static constexpr PromptAsset PROMPT_ASSETS[] = {
+  {"KR", "POLITICS", kr_prompt_politics, kr_prompt_politics_length},
+  {"KR", "BRAG",     kr_prompt_brag,     kr_prompt_brag_length},
+};
+static constexpr size_t PROMPT_ASSET_COUNT = sizeof(PROMPT_ASSETS) / sizeof(PROMPT_ASSETS[0]);
+static constexpr size_t PROMPT_SLICE_SAMPLES = 256;
+
+struct PromptPlayer {
+  const PromptAsset *asset = nullptr;
+  size_t index = 0;
+  bool active = false;
+
+  void stop() {
+    asset = nullptr;
+    index = 0;
+    active = false;
+  }
+};
+
+static PromptPlayer promptPlayer;
+static void sendLine(const char *line);
+static void flushPlaybackBuffer();
+static inline void appendPlaybackSample(int16_t sample);
+static void suspendAudioPipeline();
+
+static bool equalsIgnoreCase(const char *a, const char *b) {
+  if (!a || !b) {
+    return false;
+  }
+  while (*a && *b) {
+    if (toupper(static_cast<unsigned char>(*a)) != toupper(static_cast<unsigned char>(*b))) {
+      return false;
+    }
+    ++a;
+    ++b;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+static const PromptAsset *findPromptAsset(const char *language, const char *topic) {
+  for (size_t i = 0; i < PROMPT_ASSET_COUNT; ++i) {
+    const PromptAsset &asset = PROMPT_ASSETS[i];
+    if (equalsIgnoreCase(language, asset.language) && equalsIgnoreCase(topic, asset.topic)) {
+      return &asset;
+    }
+  }
+  return nullptr;
+}
+
+static void notifyPromptStatus(const char *status, const char *detail = nullptr) {
+  if (detail && detail[0] != '\0') {
+    char line[96];
+    snprintf(line, sizeof(line), "%s %s", status, detail);
+    sendLine(line);
+  } else {
+    sendLine(status);
+  }
+}
+
+static void finishPromptPlayback(const char *status) {
+  const PromptAsset *asset = promptPlayer.asset;
+  promptPlayer.stop();
+  flushPlaybackBuffer();
+
+  if (asset) {
+    char detail[32];
+    snprintf(detail, sizeof(detail), "%s %s", asset->language, asset->topic);
+    notifyPromptStatus(status, detail);
+  } else {
+    notifyPromptStatus(status);
+  }
+}
+
+static void abortPromptPlayback(const char *reason) {
+  if (!promptPlayer.active) {
+    return;
+  }
+  const PromptAsset *asset = promptPlayer.asset;
+  promptPlayer.stop();
+  flushPlaybackBuffer();
+  char detail[64] = {0};
+  if (asset) {
+    snprintf(detail, sizeof(detail), "%s %s", asset->language, asset->topic);
+  }
+  if (reason && reason[0] != '\0') {
+    char message[96];
+    if (detail[0] != '\0') {
+      snprintf(message, sizeof(message), "%s | %s", detail, reason);
+    } else {
+      snprintf(message, sizeof(message), "%s", reason);
+    }
+    notifyPromptStatus("PROMPT ABORT", message);
+  } else if (detail[0] != '\0') {
+    notifyPromptStatus("PROMPT ABORT", detail);
+  } else {
+    notifyPromptStatus("PROMPT ABORT");
+  }
+}
+
+static void processPromptPlayback() {
+  if (!promptPlayer.active || !promptPlayer.asset) {
+    return;
+  }
+
+  size_t produced = 0;
+  while (produced < PROMPT_SLICE_SAMPLES && promptPlayer.index < promptPlayer.asset->sampleCount) {
+    int16_t sample = static_cast<int16_t>(pgm_read_word(&promptPlayer.asset->samples[promptPlayer.index++]));
+    appendPlaybackSample(sample);
+    ++produced;
+  }
+
+  if (promptPlayer.index >= promptPlayer.asset->sampleCount) {
+    finishPromptPlayback("PROMPT DONE");
+  } else {
+    flushPlaybackBuffer();
+  }
+}
+
+static bool startPromptPlayback(const PromptAsset *asset) {
+  if (!asset || asset->sampleCount == 0) {
+    return false;
+  }
+
+  suspendAudioPipeline();
+  promptPlayer.asset = asset;
+  promptPlayer.index = 0;
+  promptPlayer.active = true;
+  char detail[32];
+  snprintf(detail, sizeof(detail), "%s %s", asset->language, asset->topic);
+  notifyPromptStatus("PROMPT OK", detail);
+  return true;
+}
 
 static Biquad makeBiquad(float b0, float b1, float b2, float a0, float a1, float a2) {
   Biquad biq{};
@@ -260,7 +407,7 @@ struct LookaheadLimiter {
 static LookaheadLimiter playbackLimiter;
 
 // ===== Helpers =====
-void sendLine(const char *line) {
+static void sendLine(const char *line) {
   Serial.write(line);
   Serial.write('\n');
 }
@@ -299,6 +446,60 @@ void handleCommand(const char *cmd) {
     return;
   }
 
+  if (strncmp(cmd, "PROMPT ", 7) == 0) {
+    if (promptPlayer.active) {
+      notifyPromptStatus("PROMPT ERR BUSY");
+      return;
+    }
+
+    char language[8] = {0};
+    char topic[24] = {0};
+    if (sscanf(cmd + 7, "%7s %23s", language, topic) != 2) {
+      notifyPromptStatus("PROMPT ERR ARG");
+      return;
+    }
+
+    const PromptAsset *asset = findPromptAsset(language, topic);
+    if (!asset) {
+      notifyPromptStatus("PROMPT ERR UNKNOWN");
+      return;
+    }
+
+    if (!presenceActive) {
+      notifyPromptStatus("PROMPT ERR NOPRESENCE");
+      return;
+    }
+
+    if (!startPromptPlayback(asset)) {
+      notifyPromptStatus("PROMPT ERR START");
+      return;
+    }
+
+    char logLine[64];
+    snprintf(logLine, sizeof(logLine), "LOG Prompt %s/%s", asset->language, asset->topic);
+    sendLine(logLine);
+    return;
+  }
+
+  if (strncmp(cmd, "DEBUG ", 6) == 0) {
+    const char *arg = cmd + 6;
+    if (strncmp(arg, "PRESENCE ", 9) == 0) {
+      const char *state = arg + 9;
+      if (strcmp(state, "ON") == 0) {
+        presenceDebug = true;
+        sendLine("LOG Presence debug ON");
+        return;
+      }
+      if (strcmp(state, "OFF") == 0) {
+        presenceDebug = false;
+        sendLine("LOG Presence debug OFF");
+        return;
+      }
+    }
+    sendLine("LOG Unknown DEBUG command");
+    return;
+  }
+
   sendLine("LOG Unknown command");
 }
 
@@ -317,7 +518,7 @@ void checkSerialCommands() {
   }
 }
 
-void suspendAudioPipeline() {
+static void suspendAudioPipeline() {
   ringWriteIndex = 0;
   ringFilled = 0;
   streamSamples = 0;
@@ -351,6 +552,9 @@ void setPresenceState(bool detected, int distanceMm) {
   sendLine(logBuf);
 
   if (!detected) {
+    if (promptPlayer.active) {
+      abortPromptPlayback("PRESENCE");
+    }
     if (dafEnabled) {
       dafEnabled = false;
       publishState();
@@ -369,6 +573,23 @@ void updatePresenceGate() {
 
   const auto radarStatus = radarDevice.getStatus();
   const int currentDistance = radarStatus.distance;
+
+  if (presenceDebug) {
+    const uint32_t dbgNow = now;
+    if (dbgNow - lastPresenceDebugMs >= 200) {
+      lastPresenceDebugMs = dbgNow;
+      char dbgLine[64];
+      snprintf(
+        dbgLine,
+        sizeof(dbgLine),
+        "LOG Radar distance=%dmm target=%d",
+        currentDistance,
+        static_cast<int>(radarStatus.targetStatus)
+      );
+      sendLine(dbgLine);
+    }
+  }
+
   if (currentDistance == -1) {
     return;
   }
@@ -510,7 +731,7 @@ void sendAudioChunk() {
   streamSamples = 0;
 }
 
-void flushPlaybackBuffer() {
+static void flushPlaybackBuffer() {
   if (playbackSamples == 0) {
     return;
   }
@@ -657,6 +878,12 @@ void setup() {
 void loop() {
   updatePresenceGate();
   checkSerialCommands();
+
+  if (promptPlayer.active) {
+    processPromptPlayback();
+    delay(1);
+    return;
+  }
 
   if (!presenceActive) {
     delay(5);

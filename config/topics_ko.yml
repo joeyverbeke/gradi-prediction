@@ -1,0 +1,32 @@
+topics:
+  - id: politics
+    prompt:
+      language: "KR"
+      asset: "POLITICS"
+    stems:
+      - 정치
+      - 미국
+      - 미국의
+      - 미국정치
+      - 대통령
+      - 선거
+      - 투표
+      - 정부
+      - 정책
+  - id: brag
+    prompt:
+      language: "KR"
+      asset: "BRAG"
+    stems:
+      - 나는
+      - 내가
+      - 내
+      - 나의
+      - 최고
+      - 제일
+      - 잘해
+      - 잘하는
+      - 잘합니다
+      - 자랑
+      - 성공
+      - 우수

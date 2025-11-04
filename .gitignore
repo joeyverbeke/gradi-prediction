@@ -8,3 +8,6 @@ AGENTS.md
 models/**
 !models/.gitkeep
 !models/**/.gitkeep
+
+# Local TTS prompt assets
+tts-prompts/

@@ -5,6 +5,7 @@ Main orchestrator that coordinates audio, ASR, LLM prediction, and DAF triggerin
 """
 
 import argparse
+import os
 import re
 import yaml
 import time
@@ -13,7 +14,8 @@ import queue
 import numpy as np
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, List, Dict
 
 try:
     from vad_webrtc import WebRTCVAD, WebRTCVADConfig  # type: ignore
@@ -37,29 +39,82 @@ except ImportError:
     ESP32SerialAudio = None  # Optional dependency for ESP32 integration
 
 
+@dataclass(frozen=True)
+class TopicDefinition:
+    id: str
+    prompt_language: str
+    prompt_asset: str
+    stems: List[str]
+    numeric_stems: List[str]
+
+
 class SpeechMonitor:
     """Main speech monitoring system"""
 
     SUPPORTED_LANGUAGES = {"en", "ko"}
 
-    def __init__(self, config_dir="config", log_level: str = "ERROR", force_cpu: bool = False, language: str = "en"):
+    def __init__(
+        self,
+        config_dir="config",
+        log_level: str = "ERROR",
+        force_cpu: bool = False,
+        language: str = "en",
+        serial_port_override: Optional[str] = None,
+        debug_presence: bool = False,
+    ):
         """Initialize speech monitoring system"""
         self.config_dir = config_dir
         self.log_level = log_level.upper()
         self.force_cpu = force_cpu
         self.language = language.lower()
+        self.serial_port_override = serial_port_override
+        self.debug_presence = debug_presence
 
         if self.language not in self.SUPPORTED_LANGUAGES:
             raise ValueError(f"Unsupported language: {self.language}")
 
         # Load configurations
         self.audio_config = self._load_config("audio.yml")
+        if self.serial_port_override:
+            normalized_port = self._normalize_serial_port(self.serial_port_override)
+            self.audio_config['esp_serial_port'] = normalized_port
         keywords_filename = f"keywords_{self.language}.yml"
         self.keywords_config = self._load_config(keywords_filename)
-        self.numeric_sensitive_stems = {
+        self.default_numeric_sensitive_stems = {
             stem.lower()
             for stem in self.keywords_config.get("numeric_sensitive_stems", [])
         }
+        self.numeric_sensitive_stems = set(self.default_numeric_sensitive_stems)
+        topics_filename = f"topics_{self.language}.yml"
+        try:
+            topics_config = self._load_config(topics_filename)
+        except RuntimeError:
+            topics_config = {}
+
+        self.topic_definitions = self._parse_topics_config(topics_config)
+        if not self.topic_definitions:
+            fallback_stems = self.keywords_config.get('stems', [])
+            if not fallback_stems:
+                raise RuntimeError(f"No topics defined in {topics_filename} and no fallback stems available")
+            fallback_topic = TopicDefinition(
+                id="default",
+                prompt_language=self.language.upper(),
+                prompt_asset="",
+                stems=fallback_stems,
+                numeric_stems=list(self.default_numeric_sensitive_stems),
+            )
+            self.topic_definitions = [fallback_topic]
+        self.topic_detectors: Dict[str, KeywordDetector] = {}
+        for topic in self.topic_definitions:
+            self.topic_detectors[topic.id] = KeywordDetector.from_config(topic.stems)
+        first_topic = self.topic_definitions[0]
+        self.detector = self.topic_detectors[first_topic.id]
+        initial_numeric = first_topic.numeric_stems or list(self.default_numeric_sensitive_stems)
+        self.numeric_sensitive_stems = {stem.lower() for stem in initial_numeric}
+        self.topic_index = -1
+        self.current_topic: Optional[TopicDefinition] = None
+        self._prompt_topic: Optional[TopicDefinition] = None
+        self.prompt_active = False
         self.numeric_scan_window = max(
             0,
             int(self.keywords_config.get("numeric_scan_window", 12))
@@ -86,7 +141,6 @@ class SpeechMonitor:
         self.audio_io = None
         self.asr = None
         self.predictor = None
-        self.detector = None
         self.state = None
         self.vad_tracker = None
 
@@ -131,7 +185,7 @@ class SpeechMonitor:
         self.presence_active = False
         self._presence_lock = threading.Lock()
         self._presence_seen = False
-        
+    
     def _load_config(self, filename: str) -> dict:
         """Load YAML configuration file"""
         config_path = f"{self.config_dir}/{filename}"
@@ -140,11 +194,129 @@ class SpeechMonitor:
                 return yaml.safe_load(f)
         except Exception as e:
             raise RuntimeError(f"Failed to load config {config_path}: {e}")
+
+    def _parse_topics_config(self, config: dict) -> List[TopicDefinition]:
+        topics: List[TopicDefinition] = []
+        if not config:
+            return topics
+
+        raw_topics = config.get("topics", [])
+        for entry in raw_topics:
+            if not isinstance(entry, dict):
+                continue
+
+            topic_id = str(entry.get("id", "")).strip()
+            if not topic_id:
+                continue
+
+            prompt_cfg = entry.get("prompt", {}) or {}
+            language = str(prompt_cfg.get("language", self.language)).strip().upper()
+            asset = str(prompt_cfg.get("asset", "")).strip().upper()
+            if not asset:
+                raise ValueError(f"Topic '{topic_id}' missing prompt asset")
+
+            raw_stems = entry.get("stems", [])
+            stems = [str(stem).strip() for stem in raw_stems if str(stem).strip()]
+            if not stems:
+                raise ValueError(f"Topic '{topic_id}' must define at least one stem")
+
+            raw_numeric = entry.get("numeric_sensitive_stems", [])
+            numeric_stems = [str(stem).strip().lower() for stem in raw_numeric if str(stem).strip()]
+
+            topics.append(
+                TopicDefinition(
+                    id=topic_id,
+                    prompt_language=language,
+                    prompt_asset=asset,
+                    stems=stems,
+                    numeric_stems=numeric_stems,
+                )
+            )
+
+        return topics
+
+    def _select_next_topic(self) -> TopicDefinition:
+        if not self.topic_definitions:
+            raise RuntimeError("Topic list is empty")
+
+        self.topic_index = (self.topic_index + 1) % len(self.topic_definitions)
+        topic = self.topic_definitions[self.topic_index]
+        self.current_topic = topic
+
+        detector = self.topic_detectors.get(topic.id)
+        if detector is None:
+            detector = KeywordDetector.from_config(topic.stems)
+            self.topic_detectors[topic.id] = detector
+        self.detector = detector
+
+        active_numeric = topic.numeric_stems or list(self.default_numeric_sensitive_stems)
+        self.numeric_sensitive_stems = {stem.lower() for stem in active_numeric}
+
+        return topic
+
+    def _format_topic(self, topic: Optional[TopicDefinition]) -> str:
+        if not topic:
+            return "unknown"
+        asset = topic.prompt_asset or "-"
+        return f"{topic.prompt_language}/{asset}:{topic.id}"
+
+    def _start_prompt_for_topic(self, topic: TopicDefinition) -> None:
+        self._prompt_topic = topic
+        if self.state:
+            self.state.off()
+        self._apply_daf_transition(False, "Prompt playback start")
+
+        should_send_prompt = (
+            self.using_esp_audio
+            and self.audio_io is not None
+            and bool(topic.prompt_asset)
+        )
+
+        if should_send_prompt:
+            command = f"PROMPT {topic.prompt_language} {topic.prompt_asset}"
+            try:
+                self.audio_io.send_command(command)
+                self.prompt_active = True
+                utils.log_audio_status(f"Prompt requested for {self._format_topic(topic)}")
+            except Exception as exc:
+                self.prompt_active = False
+                utils.log_error("Failed to request ESP prompt", exc)
+        else:
+            self.prompt_active = False
+            if self.using_esp_audio and not topic.prompt_asset:
+                utils.log_audio_status(f"No prompt asset for {self._format_topic(topic)}; skipping audio cue")
+
+    def _handle_prompt_status(self, status: str, detail: str) -> None:
+        status_upper = status.upper() if status else ""
+
+        if status_upper == "OK":
+            self.prompt_active = True
+            utils.log_audio_status(f"Prompt playback acknowledged ({detail or self._format_topic(self._prompt_topic)})")
+        elif status_upper == "DONE":
+            self.prompt_active = False
+            utils.log_audio_status(f"Prompt playback finished ({detail})")
+            self._prompt_topic = None
+        elif status_upper == "ABORT":
+            self.prompt_active = False
+            utils.log_audio_status(f"Prompt playback aborted ({detail})")
+            self._prompt_topic = None
+        elif status_upper == "ERR":
+            self.prompt_active = False
+            utils.log_audio_status(f"Prompt playback error ({detail})")
+
+    def _normalize_serial_port(self, port: str) -> str:
+        """Normalize serial port names for POSIX vs Windows targets."""
+        if os.name != "nt" and not port.startswith("/"):
+            return f"/dev/{port}"
+        return port
     
     def initialize(self):
         """Initialize all system components"""
         utils.setup_logging(self.log_level)
         utils.log_audio_status("Initializing system...")
+        utils.log_audio_status(
+            f"Configured {len(self.topic_definitions)} topics (first: {self._format_topic(self.topic_definitions[0])})"
+        )
         
         try:
             audio_source = self.audio_config.get('audio_source', 'local').lower()
@@ -167,6 +339,8 @@ class SpeechMonitor:
                     raise RuntimeError(
                         "audio.yml missing esp_serial_port for ESP32 serial audio mode"
                     )
+                if self.serial_port_override:
+                    utils.log_audio_status(f"Serial port override applied: {serial_path}")
 
                 # Initialize DAF ring for trigger/hold tracking only
                 self.daf_ring = DAFRing(
@@ -189,6 +363,7 @@ class SpeechMonitor:
                     log_callback=utils.log_audio_status,
                     state_callback=self._handle_esp_state_update,
                     presence_callback=self._handle_presence_change,
+                    prompt_callback=self._handle_prompt_status,
                 )
                 self.audio_io.set_daf_ring(self.daf_ring)
                 self.presence_active = False
@@ -286,11 +461,6 @@ class SpeechMonitor:
                 context_tokens=self.keywords_config.get('context_tokens', 96),
                 n_gpu_layers=n_gpu_layers,
                 prompt_template=self.keywords_config.get('prompt_template', '{context}')
-            )
-            
-            # Initialize keyword detector
-            self.detector = KeywordDetector.from_config(
-                self.keywords_config['stems']
             )
             
             # Initialize DAF state
@@ -542,7 +712,10 @@ class SpeechMonitor:
             
             # Get partial tail for scanning
             partial_tail = self._get_partial_tail()
-            
+
+            if self.prompt_active:
+                return
+
             # Scan for keywords and numeric follow-ups
             matches_asr = self.detector.find_matches(partial_tail)
             matches_llm = self.detector.find_matches(self.horizon_text) if self.horizon_text else []
@@ -620,6 +793,8 @@ class SpeechMonitor:
                 try:
                     self.audio_io.request_state_sync()
                     self.audio_io.request_presence_sync()
+                    if self.debug_presence:
+                        self.audio_io.set_presence_debug(True)
                 except Exception as e:
                     utils.log_error("Failed to sync ESP32 state", e)
 
@@ -672,6 +847,11 @@ class SpeechMonitor:
                         self.audio_io.disable_daf()
                     except Exception as e:
                         utils.log_error("Failed to disable ESP32 DAF during cleanup", e)
+                if self.debug_presence:
+                    try:
+                        self.audio_io.set_presence_debug(False)
+                    except Exception as e:
+                        utils.log_error("Failed to disable ESP32 presence debug", e)
             self.audio_io.stop()
         
         # Log final statistics
@@ -730,6 +910,8 @@ class SpeechMonitor:
             self._on_presence_suspended()
 
     def _on_presence_suspended(self) -> None:
+        self.prompt_active = False
+        self._prompt_topic = None
         self.partial_text = ""
         self.horizon_text = ""
         self._last_horizon_logged = ""
@@ -759,6 +941,13 @@ class SpeechMonitor:
         if self.audio_io:
             self.audio_io.clear_queue()
 
+        try:
+            topic = self._select_next_topic()
+            utils.log_audio_status(f"Topic selected: {self._format_topic(topic)}")
+            self._start_prompt_for_topic(topic)
+        except Exception as exc:
+            utils.log_error("Failed to select prompt topic", exc)
+
 
 def main():
     """Main entry point"""
@@ -781,6 +970,15 @@ def main():
         choices=["en", "ko"],
         default="en",
         help="Select language-specific ASR, keywords, and predictor assets",
+    )
+    parser.add_argument(
+        "--port",
+        help="Override ESP32 serial port configured in audio.yml (e.g. ttyACM0 or /dev/ttyACM0)",
+    )
+    parser.add_argument(
+        "--debug-logging",
+        action="store_true",
+        help="Enable verbose presence/radar debug logging",
     )
     args = parser.parse_args()
 
@@ -806,7 +1004,13 @@ def main():
     
     # Create and run speech monitor
     log_level = "INFO" if args.logging else "ERROR"
-    monitor = SpeechMonitor(log_level=log_level, force_cpu=args.cpu_only, language=args.language)
+    monitor = SpeechMonitor(
+        log_level=log_level,
+        force_cpu=args.cpu_only,
+        language=args.language,
+        serial_port_override=args.port,
+        debug_presence=args.debug_logging,
+    )
     
     try:
         monitor.initialize()
@@ -818,5 +1022,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import os
     exit(main())
