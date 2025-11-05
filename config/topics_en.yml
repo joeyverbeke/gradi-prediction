@@ -1,0 +1,213 @@
+topics:
+  - id: politics
+    prompt:
+      language: "EN"
+      asset: "POLITICS"
+    stems:
+      - politics
+      - american politics
+      - united states
+      - u.s. politics
+      - election
+      - elections
+      - voter
+      - vote
+      - ballot
+      - electoral college
+      - primary
+      - caucus
+      - midterms
+      - midterm
+      - campaign
+      - political campaign
+      - debate
+      - poll numbers
+      - approval rating
+      - donald trump
+      - trump
+      - joe biden
+      - biden
+      - kamala harris
+      - harris
+      - ron desantis
+      - desantis
+      - gavin newsom
+      - newsom
+      - republican
+      - republican party
+      - democrat
+      - democratic party
+      - conservative
+      - liberal
+      - progressive
+      - far right
+      - far left
+      - fascism
+      - authoritarian
+      - dictatorship
+      - congress
+      - senate
+      - house of representatives
+      - speaker of the house
+      - white house
+      - supreme court
+      - chief justice
+      - federal judge
+      - impeachment
+      - indictment
+      - arraignment
+      - trial
+      - guilty verdict
+      - not guilty
+      - capitol riot
+      - january 6
+      - policy
+      - immigration
+      - border security
+      - abortion
+      - gun control
+      - second amendment
+      - taxes
+      - economy
+      - inflation
+      - unemployment
+      - jobs report
+      - foreign policy
+      - national security
+      - defense spending
+      - nato
+      - alliance
+      - sanctions
+      - ukraine
+      - russia
+      - china
+      - israel
+      - gaza
+      - palestine
+      - collapse
+      - collapsing
+      - powerful
+      - power grab
+      - corruption
+      - scandal
+      - whistleblower
+  - id: brag
+    prompt:
+      language: "EN"
+      asset: "BRAG"
+    stems:
+      - brag
+      - bragging
+      - boasting
+      - boast
+      - flex
+      - humble brag
+      - showing off
+      - show off
+      - i am the best
+      - i'm the best
+      - i am number one
+      - i'm number one
+      - number one
+      - top dog
+      - top of the class
+      - best in the world
+      - best in the company
+      - best on the team
+      - unbeatable
+      - unstoppable
+      - genius
+      - smartest
+      - brilliant
+      - prodigy
+      - gifted
+      - talented
+      - super talented
+      - high achiever
+      - overachiever
+      - high performer
+      - top performer
+      - crushing it
+      - killing it
+      - nailed it
+      - crushed it
+      - nailed the project
+      - nailed the presentation
+      - i crushed
+      - i nailed
+      - pride myself
+      - proud of myself
+      - i'm so proud
+      - i'm amazing
+      - i'm incredible
+      - i'm unstoppable
+      - i always win
+      - always winning
+      - can't lose
+      - never lose
+      - undefeated
+      - champ
+      - champion
+      - best ever
+      - living legend
+      - icon
+      - influencer
+      - famous
+      - celebrity
+      - viral
+      - millions of followers
+      - huge following
+      - so many followers
+      - social media star
+      - award winning
+      - won an award
+      - won awards
+      - trophy
+      - took the trophy
+      - got the trophy
+      - promotion
+      - got promoted
+      - landed the promotion
+      - big raise
+      - huge raise
+      - highest salary
+      - massive salary
+      - millionaire
+      - billionaire
+      - rich
+      - wealthy
+      - loaded
+      - rolling in money
+      - so much money
+      - luxury car
+      - sports car
+      - private jet
+      - first class
+      - designer clothes
+      - best dressed
+      - sharp dressed
+      - flawless
+      - perfect
+      - immaculate
+      - impeccable
+      - looking great
+      - best looking
+      - hottest
+      - ripped
+      - shredded
+      - fit body
+      - six pack
+      - chiseled
+      - everyone admires me
+      - people envy me
+      - everyone jealous
+      - envy me
+      - jealous of me
+      - people look up to me
+      - role model
+      - inspirational
+      - i inspire people
+      - leading the pack
+      - natural leader
+      - born leader
+      - visionary

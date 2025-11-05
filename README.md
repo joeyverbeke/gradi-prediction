@@ -87,6 +87,7 @@ PY
      | RX        | D4 (GPIO5) | Radar ← ESP TX |
 
      The radar UART runs at 256 000 baud (match whatever you configured in the Seeed tool). **Double-check that the radar TX line lands on XIAO pad D1 (ESP RX) and the radar RX line lands on pad D4 (ESP TX); swapping them will silently break presence.** When the sensor reports “PRESENCE ON/OFF” the firmware halts or resumes the I²S capture, forces DAF off, and notifies the host via the serial protocol so the desktop app idles automatically when nobody is nearby.
+   - Topic prompts: convert 16 kHz mono PCM snippets in `tts-prompts/` into PROGMEM headers with `python3 scripts/gen_prompt_header.py --input <raw> --output firmware/esp-daf/<name>.h --symbol <symbol>`, then register the new asset in `PROMPT_ASSETS`.
 
 ## Models
 
@@ -101,7 +102,7 @@ Adjust paths in `src/main.py` if you host the assets elsewhere.
 
 ## Configuration
 
-Key settings live in `config/audio.yml` (audio pipeline + ESP32 serial) and the language-specific keyword files (`config/keywords_en.yml`, `config/keywords_ko.yml`).
+Key settings live in `config/audio.yml` (audio pipeline + ESP32 serial), the language-specific keyword files (`config/keywords_en.yml`, `config/keywords_ko.yml`), and the optional topic definitions (`config/topics_en.yml`, `config/topics_ko.yml`).
 
 `config/audio.yml` (defaults shown):
 
@@ -140,6 +141,7 @@ Pick the keyword file that matches your locale (`config/keywords_en.yml` or `con
 - `numeric_sensitive_stems` + `numeric_scan_window`: stems that trigger extra digit detection immediately after the match
 - `llm_model_path`, `context_tokens`, `prompt_template`, and sampling knobs for the horizon predictor
 
+If a matching `topics_<lang>.yml` exists the host rotates through those topic groups, loading per-topic stems and dispatching ESP32 audio prompts (`tts-prompts/<LANG>-*.raw`). Empty or missing topic files fall back to the plain keyword list for backward compatibility.
 Set `webrtc_vad.enabled` to `false` to fall back to the legacy RMS gate (not recommended except for debugging installs without the `webrtcvad` package).
 
 DAF remains active while either WebRTC VAD detects sustained speech or Vosk continues to emit new partial transcripts. It disengages after `speech_release_ms` of silence (or `daf_max_active_ms`, whichever comes first), which keeps the feedback responsive even in noisy environments.

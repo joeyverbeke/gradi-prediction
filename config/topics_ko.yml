@@ -4,29 +4,148 @@ topics:
       language: "KR"
       asset: "POLITICS"
     stems:
-      - 정치
-      - 미국
-      - 미국의
-      - 미국정치
-      - 대통령
-      - 선거
-      - 투표
-      - 정부
-      - 정책
+      - 정치 # politics
+      - 미국 # United States
+      - 미국의 # American / of the U.S.
+      - 미국 정치 # U.S. politics
+      - 미국정치 # U.S. politics (no space)
+      - 대통령 # president
+      - 대통령 선거 # presidential election
+      - 대선 # presidential election (abbr.)
+      - 중간선거 # midterm election
+      - 경선 # primary
+      - 선거 # election
+      - 투표 # vote
+      - 개표 # vote counting
+      - 선거인단 # electoral college
+      - 부정선거 # rigged election
+      - 선거 조작 # election fraud
+      - 도널드 트럼프 # Donald Trump
+      - 트럼프 # Trump
+      - 조 바이든 # Joe Biden
+      - 바이든 # Biden
+      - 카말라 해리스 # Kamala Harris
+      - 해리스 # Harris
+      - 공화당 # Republican Party
+      - 민주당 # Democratic Party
+      - 보수 # conservative
+      - 진보 # progressive
+      - 극우 # far-right
+      - 극좌 # far-left
+      - 파시즘 # fascism
+      - 독재 # dictatorship
+      - 권위주의 # authoritarianism
+      - 의회 # Congress
+      - 상원 # Senate
+      - 하원 # House of Representatives
+      - 백악관 # White House
+      - 대법원 # Supreme Court
+      - 법원 # court
+      - 헌법 # constitution
+      - 판사 # judge
+      - 검찰 # prosecutors
+      - 연방 # federal
+      - 주지사 # governor
+      - 주 의회 # state legislature
+      - 탄핵 # impeachment
+      - 기소 # indictment
+      - 재판 # trial
+      - 유죄 # guilty
+      - 무죄 # not guilty
+      - 의사당 난입 # Capitol riot
+      - "1월 6일" # January 6th
+      - 정책 # policy
+      - 이민 # immigration
+      - 국경 # border
+      - 낙태 # abortion
+      - 총기 # guns
+      - 세금 # taxes
+      - 경제 # economy
+      - 인플레이션 # inflation
+      - 실업 # unemployment
+      - 일자리 # jobs
+      - 외교 # foreign policy
+      - 국방 # national defense
+      - 러시아 # Russia
+      - 중국 # China
+      - 우크라이나 # Ukraine
+      - 이스라엘 # Israel
+      - 가자 # Gaza
+      - 팔레스타인 # Palestine
+      - 나토 # NATO
+      - 제재 # sanctions
+      - 동맹 # alliance
+      - 지지율 # approval rating
+      - 여론 # public opinion
+      - 여론조사 # poll
+      - 권력 # power
+      - 권력자 # powerful figure
+      - 강력 # powerful / strong
+      - 붕괴 # collapse
+      - 무너지는 # collapsing
+      - 몰락 # downfall
   - id: brag
     prompt:
       language: "KR"
       asset: "BRAG"
     stems:
-      - 나는
-      - 내가
-      - 내
-      - 나의
-      - 최고
-      - 제일
-      - 잘해
-      - 잘하는
-      - 잘합니다
-      - 자랑
-      - 성공
-      - 우수
+      - 자랑 # brag / boast
+      - 허세 # showing off / swagger
+      - 잘난체 # acting superior / showing off
+      - 나는 # I (am)
+      - 내가 # I (subject)
+      - 내 # my
+      - 나의 # my
+      - 최고 # the best
+      - 최고야 # I'm the best
+      - 제일 # number one
+      - "1등" # first place
+      - "1위" # number one (rank)
+      - 최강 # strongest
+      - 천재 # genius
+      - 똑똑 # smart
+      - 영리 # clever
+      - 능력자 # highly capable person
+      - 실력 # skill
+      - 실력자 # skilled person
+      - 우수 # excellent
+      - 성공 # success
+      - 성공했 # succeeded
+      - 대박 # big hit
+      - 승진 # promotion
+      - 리더 # leader
+      - 팀장 # team lead
+      - 영향력 # influence
+      - 파워풀 # powerful
+      - 강력 # strong / powerful
+      - 유명 # famous
+      - 인지도 # recognition
+      - 인기 # popularity
+      - 팔로워 # followers
+      - 구독자 # subscribers
+      - 조회수 # views
+      - 상 받았 # received an award
+      - 상 탔 # won a prize
+      - 수상 # award-winning
+      - 명문대 # prestigious university
+      - 아이비리그 # Ivy League
+      - 스펙 # credentials / resume
+      - 학벌 # academic pedigree
+      - 연봉 # annual salary
+      - 억만장자 # billionaire
+      - 부자 # rich
+      - 부유 # wealthy
+      - 돈 많 # lots of money
+      - 돈 벌었 # made money
+      - 재산 # assets / wealth
+      - 잘해 # good at (do well)
+      - 잘한다 # does well
+      - 잘함 # doing well
+      - 잘했 # did well
+      - 제일 잘 # best at
+      - 넘사벽 # unbeatable / on another level
+      - 최고 기록 # record best
+      - 기록 갱신 # broke a record
+      - 몸짱 # fit body
+      - 잘생 # handsome
+      - 예쁘 # pretty

@@ -9,6 +9,8 @@
 #include <mmwave_for_xiao.h>
 #include "kr_prompt_brag.h"
 #include "kr_prompt_politics.h"
+#include "en_prompt_politics.h"
+#include "en_prompt_brag.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -105,6 +107,8 @@ struct PromptAsset {
 static constexpr PromptAsset PROMPT_ASSETS[] = {
   {"KR", "POLITICS", kr_prompt_politics, kr_prompt_politics_length},
   {"KR", "BRAG",     kr_prompt_brag,     kr_prompt_brag_length},
+  {"EN", "POLITICS", en_prompt_politics, en_prompt_politics_length},
+  {"EN", "BRAG",     en_prompt_brag,     en_prompt_brag_length},
 };
 static constexpr size_t PROMPT_ASSET_COUNT = sizeof(PROMPT_ASSETS) / sizeof(PROMPT_ASSETS[0]);
 static constexpr size_t PROMPT_SLICE_SAMPLES = 256;
