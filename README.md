@@ -1,178 +1,67 @@
 # Gradi Prediction Speech Monitor
 
-An integrated desktop + ESP32 system that continuously captures voice from the ESP32-S3 `esp-daf` firmware, transcribes it on the host, predicts risky phrases, and commands on-device delayed auditory feedback (DAF) with a 175 ms delay.
+Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, detecting risky phrases, and driving delayed auditory feedback (DAF).
 
-## Directory Layout
+## Quick Start
+- Install Python 3.11, ensure `uv` CLI is available, and clone this repo.
+- Set up the virtualenv: `uv venv --python 3.11 && source .venv/bin/activate && uv pip install -e .`
+- Populate `models/` with the required Vosk ASR and llama.cpp GGUF checkpoints (see below).
+- Flash `firmware/esp32/esp-daf/esp-daf.ino` to a Seeed XIAO ESP32S3, including the generated prompt headers.
+- Run `python src/main.py --language en --logging` (add `--port ttyACM*` to override the serial device).
 
-```
-gradi-prediction/
-├── config/                # YAML configuration (audio + keywords)
-├── firmware/
-│   └── esp32/esp-daf/     # Arduino sketch for the XIAO ESP32S3 DAF firmware
-├── models/                # Place ASR + LLM model assets here
-└── src/                   # Python sources (main orchestrator + modules)
-```
+## Host Environment
+- All runtime dependencies live in `pyproject.toml`; `uv pip install -e .` keeps them in sync with the editable code.
+- Optional developer extras (ruff, ipython) install via `uv pip install -e .[dev]`.
+- For microphone fallback (`audio_source: local`) install PortAudio system libs first: `sudo apt install libportaudio2`.
+- Verify WebRTC VAD after setup:
+  ```bash
+  python - <<'PY'
+  import webrtcvad
+  print("WebRTC VAD ready:", webrtcvad.__version__)
+  PY
+  ```
+- Need GPU offload? Install a CUDA-enabled `llama-cpp-python` wheel and leave `llm_gpu_layers` at `-1`, or launch with `--cpu-only` to force CPU runs.
 
-`models/` currently mirrors the working setup in this repository. Replace the contents as needed with your preferred Vosk + LLaMA checkpoints.
-
-## Host Environment Setup
-
-The project targets Python 3.11 and has been verified on Ubuntu 24.04 (WSL2).
-
-```bash
-cd gradi-prediction
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -e .
-```
-
-All runtime dependencies now live in `pyproject.toml`, so `uv pip install -e .` (or `uv pip install .` if you do not want editable mode) will keep the environment in sync—including `setuptools`, which the `webrtcvad` wheel relies on for `pkg_resources`. Add the optional developer helpers (ruff, ipython) with `uv pip install -e .[dev]`.
-
-To double-check WebRTC VAD availability after install:
-
-```bash
-python - <<'PY'
-import webrtcvad
-print("WebRTC VAD ready:", webrtcvad.__version__)
-PY
-```
-
-If you plan to use the local microphone fallback (`audio_source: local`), install PortAudio system libraries first:
-
-```bash
-sudo apt install libportaudio2
-```
-
-### Optional: GPU Acceleration for llama.cpp
-
-With the bundled config the desktop app will auto-offload llama.cpp to GPU whenever the CUDA-enabled wheel is installed (`llm_gpu_layers: -1`). Use the `--cpu-only` flag at launch if you need to keep inference on the CPU for a session.
-
-If you want to rebuild `llama-cpp-python` with CUDA enabled, keep `llm_gpu_layers` at `-1` for full auto offload (or set it to `0` when building a CPU-only wheel).
-
-```bash
-source .venv/bin/activate
-sudo apt install build-essential cmake ninja-build
-
-export LLAMA_CUDA_ARCH_LIST="120"              # replace with your card's compute capability ×10
-export CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_F16=on"
-export FORCE_CMAKE=1
-
-uv pip install --force-reinstall --no-cache-dir \
-    --no-binary llama-cpp-python llama-cpp-python==0.2.90
-```
-
-Verify the build:
-
-```bash
-PYTHONPATH=src python - <<'PY'
-from predictor_llamacpp import PredictorLlamaCPP
-_ = PredictorLlamaCPP(n_gpu_layers=-1)
-PY
-```
-
-## ESP32 Firmware
-
-1. Open `firmware/esp32/esp-daf/esp-daf.ino` in Arduino IDE (or PlatformIO).
-2. Select the Seeed XIAO ESP32S3 (or your target ESP32-S3 board) and set the serial monitor baud to `921600`.
-3. Flash the sketch. On reset the firmware will log to serial and wait for commands from the desktop.
-   - The firmware now links against the `ESP32-SpeexDSP` library (install via Arduino Library Manager) so every 10 ms frame is denoised before entering the DAF ring. See `setupSpeexPreprocessor()` to tweak the single `noiseSuppressDb` constant (default `-36` dB).
-   - After the delay, the playback chain applies a fixed high-pass (~850 Hz), a modest +2.5 dB presence bump at 2.5 kHz, a 6.8 kHz low-pass, and a -3 dBFS limiter with -6 dB pre-gain. This keeps the tiny speaker from blasting while preserving intelligibility. The host stream still receives the raw microphone signal.
-   - Presence gating: the firmware now polls Seeed Studio’s 24 GHz mmWave radar (XIAO form factor) over `Serial1` and only streams audio when someone is within ~0.3 m. Install the `mmwave_for_xiao` Arduino library and wire the radar board to the XIAO ESP32S3 as follows:
-
-     | Radar pin | XIAO pad | Notes |
-     |-----------|----------|-------|
-     | VCC       | 3V3      | 3.3 V supply |
-     | GND       | GND      | Common ground |
-     | TX        | D1 (GPIO2) | Radar → ESP RX |
-     | RX        | D4 (GPIO5) | Radar ← ESP TX |
-
-     The radar UART runs at 256 000 baud (match whatever you configured in the Seeed tool). **Double-check that the radar TX line lands on XIAO pad D1 (ESP RX) and the radar RX line lands on pad D4 (ESP TX); swapping them will silently break presence.** When the sensor reports “PRESENCE ON/OFF” the firmware halts or resumes the I²S capture, forces DAF off, and notifies the host via the serial protocol so the desktop app idles automatically when nobody is nearby.
-   - Topic prompts: convert 16 kHz mono PCM snippets in `tts-prompts/` into PROGMEM headers with `python3 scripts/gen_prompt_header.py --input <raw> --output firmware/esp-daf/<name>.h --symbol <symbol>`, then register the new asset in `PROMPT_ASSETS`.
+## ESP32 Firmware & Prompts
+- Open `firmware/esp32/esp-daf/esp-daf.ino` in Arduino IDE / PlatformIO, target the XIAO ESP32S3, and set serial baud to `921600`.
+- The sketch depends on `ESP32-SpeexDSP` and `mmwave_for_xiao`; install both through the Arduino Library Manager.
+- Presence sensing uses Seeed’s 24 GHz radar (TX→D1, RX→D4). The firmware pauses audio + DAF whenever presence is lost.
+- Prompt audio: convert 16 kHz mono PCM files in `tts-prompts/` into headers with `python3 scripts/gen_prompt_header.py --input <raw> --output firmware/esp-daf/<name>.h --symbol <symbol>`, then add the asset to `PROMPT_ASSETS`.
 
 ## Models
-
-The desktop application expects:
-
 - English ASR: `models/asr/vosk-model-small-en-us/`
 - Korean ASR: `models/asr/vosk-model-small-ko-0.22/`
 - English horizon LLM: `models/llm/llama-3.2-1b-q4_k_m.gguf`
 - Korean horizon LLM: `models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf`
+- Adjust paths in the keyword configs if you store checkpoints elsewhere.
 
-Adjust paths in `src/main.py` if you host the assets elsewhere.
+## Configuration Overview
+- `config/audio.yml`: audio transport, VAD, DAF timing, ESP32 serial port.
+- `config/keywords_<lang>.yml`: baseline sensitive stems, numeric stem handling, llama.cpp parameters.
+- `config/topics_<lang>.yml`: optional topic rotation definitions (id, prompt asset, per-topic stems). Missing files fall back to the keyword list.
+- Launch options: `--logging` upgrades Loguru to INFO, `--cpu-only` disables GPU offload, `--port` overrides `esp_serial_port`.
+- Example run commands:
+  ```bash
+  python src/main.py --language en --logging
+  python src/main.py --language ko --port ttyACM1
+  ```
 
-## Configuration
-
-Key settings live in `config/audio.yml` (audio pipeline + ESP32 serial), the language-specific keyword files (`config/keywords_en.yml`, `config/keywords_ko.yml`), and the optional topic definitions (`config/topics_en.yml`, `config/topics_ko.yml`).
-
-`config/audio.yml` (defaults shown):
-
-```yaml
-audio_source: esp32_serial
-sample_rate: 16000
-frame_ms: 20
-daf_delay_ms: 175
-hold_ms: 600
-consecutive_hits: 2
-input_gain: 1.0
-output_gain: 0.9
-limiter_ceiling_db: -3.0
-vad_enabled: true
-vad_rms_threshold: 0.015
-vad_silence_ms: 1000
-daf_latch_until_silence: true
-speech_release_ms: 750
-partial_activity_ms: 800
-daf_max_active_ms: 5000
-daf_activation_squelch_ms: 300
-webrtc_vad:
-  enabled: true
-  aggressiveness: 2
-  activation_frames: 3
-  release_frames: 5
-esp_serial_port: /dev/ttyACM0
-esp_serial_baud: 921600
-esp_chunk_samples: 1024
-```
-
-Update `esp_serial_port` to match the device exposed when the ESP32 is connected (`ls /dev/ttyACM*` on Ubuntu). You can temporarily override this value at launch with `--port` (e.g. `--port ttyACM1` or `--port /dev/ttyACM1`); bare names automatically expand to `/dev/<name>` on Linux and macOS. If you switch back to host audio capture, change `audio_source` to `local` and configure `input_device`/`output_device`.
-
-Pick the keyword file that matches your locale (`config/keywords_en.yml` or `config/keywords_ko.yml`). Each file defines:
-- `stems`: keyword stems watched in streaming ASR and LLM predictions
-- `numeric_sensitive_stems` + `numeric_scan_window`: stems that trigger extra digit detection immediately after the match
-- `llm_model_path`, `context_tokens`, `prompt_template`, and sampling knobs for the horizon predictor
-
-If a matching `topics_<lang>.yml` exists the host rotates through those topic groups, loading per-topic stems and dispatching ESP32 audio prompts (`tts-prompts/<LANG>-*.raw`). Empty or missing topic files fall back to the plain keyword list for backward compatibility.
-Set `webrtc_vad.enabled` to `false` to fall back to the legacy RMS gate (not recommended except for debugging installs without the `webrtcvad` package).
-
-DAF remains active while either WebRTC VAD detects sustained speech or Vosk continues to emit new partial transcripts. It disengages after `speech_release_ms` of silence (or `daf_max_active_ms`, whichever comes first), which keeps the feedback responsive even in noisy environments.
-
-When running in `esp32_serial` mode the host also honors the mmWave “presence” feed. ASR, LLM, and DAF processing are suspended whenever the ESP32 reports `PRESENCE OFF`, and they resume immediately once the radar sees someone within range—no extra config required beyond wiring the sensor.
-
-## Running the Pipeline
-
-1. Activate the virtualenv and ensure the ESP32 is connected over USB.
-2. From the `gradi-prediction` directory run:
-
-   ```bash
-   python src/main.py --language en                 # English mode (default)
-   python src/main.py --language ko                 # Korean mode
-   python src/main.py --language en --port ttyACM1  # Override config serial port for this session
-   # add --logging for INFO-level diagnostics, --cpu-only to bypass GPU
-   ```
-
-   Use `--cpu-only` when you want to override the default GPU-enabled horizon predictor without editing configs, regardless of language.
-
-3. The host will sync the ESP32 DAF state, stream audio frames over serial, and toggle delayed playback when configured keywords or predicted risky phrases are detected. DAF then releases automatically after speech activity stops or when the maximum active window elapses.
-
-Logs are emitted via `loguru` for ASR partials, LLM predictions, keyword hits, and DAF transitions.
+## Topic Design
+- Each topic entry sets `language`, `asset`, and `stems`; ensure the asset string matches a prompt header compiled into the firmware.
+- Keep stems short enough to capture variants (e.g., “trump”, “도널드 트럼프”) while avoiding overly generic hits.
+- Numeric-sensitive stems live in the keyword config; per-topic overrides are optional. The host watches the matched stem window for digits to catch account numbers or PINs.
 
 ## Troubleshooting
+- **Serial unavailable**: confirm `/dev/ttyACM*`, ensure dialout group membership, and match baud to `audio.yml`.
+- **No audio**: verify the ESP32 sketch is running, topic prompts compiled, and radar presence reported as active.
+- **sounddevice errors**: install PortAudio or stay in ESP serial mode.
+- **Large model downloads**: preload `models/` manually; the repo does not ship checkpoints.
 
-- **Serial cannot open**: Verify group membership (`sudo usermod -aG dialout $USER`) and confirm the `/dev/ttyACM*` path.
-- **No audio arriving**: Ensure the ESP32 sketch is flashed and the serial baud matches `esp_serial_baud`.
-- **sounddevice errors**: Install PortAudio (above) or keep `audio_source: esp32_serial`.
-- **Large model downloads**: Populate `models/` manually if the repo does not include them.
-
-## License
-
-This directory collects the up-to-date integration artifacts for the Gradi predictive speech monitoring prototype.
+## Repository Map
+```
+gradi-prediction/
+├── config/                # YAML runtime settings
+├── firmware/esp32/esp-daf # ESP32-S3 Arduino sketch + prompt assets
+├── models/                # ASR + LLM checkpoints (not versioned)
+└── src/                   # Python host application
+```
