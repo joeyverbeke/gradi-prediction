@@ -973,7 +973,7 @@ def main():
     )
     parser.add_argument(
         "--port",
-        help="Override ESP32 serial port configured in audio.yml (e.g. ttyACM0 or /dev/ttyACM0)",
+        help="Override ESP32 serial port configured in audio.yml (default /dev/gradi-esp-predict; e.g. /dev/ttyACM0)",
     )
     parser.add_argument(
         "--debug-logging",

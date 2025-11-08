@@ -23,6 +23,6 @@ webrtc_vad:
   aggressiveness: 2
   activation_frames: 3
   release_frames: 5
-esp_serial_port: /dev/ttyACM0    # e.g. /dev/ttyACM0 when using ESP32 serial mode
+esp_serial_port: /dev/gradi-esp-predict    # udev alias; override to /dev/ttyACM* if needed
 esp_serial_baud: 921600
 esp_chunk_samples: 1024

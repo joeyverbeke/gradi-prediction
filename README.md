@@ -7,7 +7,7 @@ Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, dete
 - Set up the virtualenv: `uv venv --python 3.11 && source .venv/bin/activate && uv pip install -e .`
 - Populate `models/` with the required Vosk ASR and llama.cpp GGUF checkpoints (see below).
 - Flash `firmware/esp32/esp-daf/esp-daf.ino` to a Seeed XIAO ESP32S3, including the generated prompt headers.
-- Run `python src/main.py --language en --logging` (add `--port ttyACM*` to override the serial device).
+- Run `python src/main.py --language en --logging` (defaults to `/dev/gradi-esp-predict`; add `--port /dev/ttyACM*` to override).
 
 ## Host Environment
 - All runtime dependencies live in `pyproject.toml`; `uv pip install -e .` keeps them in sync with the editable code.
@@ -43,7 +43,7 @@ Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, dete
 - Example run commands:
   ```bash
   python src/main.py --language en --logging
-  python src/main.py --language ko --port ttyACM1
+  python src/main.py --language ko --port /dev/ttyACM1
   ```
 
 ## Topic Design
@@ -52,7 +52,7 @@ Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, dete
 - Numeric-sensitive stems live in the keyword config; per-topic overrides are optional. The host watches the matched stem window for digits to catch account numbers or PINs.
 
 ## Troubleshooting
-- **Serial unavailable**: confirm `/dev/ttyACM*`, ensure dialout group membership, and match baud to `audio.yml`.
+- **Serial unavailable**: confirm `/dev/gradi-esp-predict` (or the matching `/dev/ttyACM*` device) exists, ensure dialout group membership, and match baud to `audio.yml`.
 - **No audio**: verify the ESP32 sketch is running, topic prompts compiled, and radar presence reported as active.
 - **sounddevice errors**: install PortAudio or stay in ESP serial mode.
 - **Large model downloads**: preload `models/` manually; the repo does not ship checkpoints.
