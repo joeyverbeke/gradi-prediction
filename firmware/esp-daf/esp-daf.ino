@@ -23,7 +23,8 @@ static constexpr int SERIAL_BAUD = 921600;
 static constexpr int DELAY_MS = 175;
 static constexpr int DELAY_SAMPLES = SAMPLE_RATE * DELAY_MS / 1000; // 2800
 static constexpr int RING_CAPACITY = 4096; // Must exceed delay samples
-static constexpr float MAX_OUTPUT_DBFS = -18.0f; // Adjust to set absolute playback ceiling
+static constexpr float MAX_OUTPUT_DBFS = -15.0f; // Adjust to set absolute playback ceiling
+static constexpr float PROMPT_GAIN = 0.3f;      // Attenuation for prompt playback
 
 // I2S microphone (ICS43434) pins on XIAO ESP32S3
 static constexpr int PIN_MIC_BCLK = 3;  // D2 -> GPIO3
@@ -44,7 +45,7 @@ static constexpr int RADAR_BAUD = 256000;
 static constexpr int PRESENCE_THRESHOLD_MM = 30;            // 0.3 m threshold to detect someone
 static constexpr uint16_t POLL_DELAY_NO_PRESENCE_MS = 20;   // Fast polling when idle
 static constexpr uint16_t POLL_DELAY_PRESENCE_MS = 100;     // Slow polling once latched
-static constexpr uint16_t PRESENCE_CLEAR_DELAY_MS = 1500;   // Require absence this long before disabling
+static constexpr uint16_t PRESENCE_CLEAR_DELAY_MS = 3000;   // Require absence this long before disabling
 
 static constexpr i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 static constexpr i2s_port_t I2S_PORT_SPK = I2S_NUM_0;
@@ -213,6 +214,7 @@ static void processPromptPlayback() {
   size_t produced = 0;
   while (produced < PROMPT_SLICE_SAMPLES && promptPlayer.index < promptPlayer.asset->sampleCount) {
     int16_t sample = static_cast<int16_t>(pgm_read_word(&promptPlayer.asset->samples[promptPlayer.index++]));
+    sample = static_cast<int16_t>(static_cast<float>(sample) * PROMPT_GAIN);
     appendPlaybackSample(sample);
     ++produced;
   }
