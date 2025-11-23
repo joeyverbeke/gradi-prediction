@@ -7,7 +7,7 @@ Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, dete
 - Set up the virtualenv: `uv venv --python 3.11 && source .venv/bin/activate && uv pip install -e .`
 - Populate `models/` with the required Vosk ASR and llama.cpp GGUF checkpoints (see below).
 - Flash `firmware/esp32/esp-daf/esp-daf.ino` to a Seeed XIAO ESP32S3, including the generated prompt headers.
-- Run `python src/main.py --language en --logging` (defaults to `/dev/gradi-esp-predict`; add `--port /dev/ttyACM*` to override).
+- Run `python src/main.py --language ko --logging` (defaults to `/dev/gradi-esp-predict`; add `--port /dev/ttyACM*` to override).
 
 ## Host Environment
 - All runtime dependencies live in `pyproject.toml`; `uv pip install -e .` keeps them in sync with the editable code.
