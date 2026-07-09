@@ -132,6 +132,10 @@ class SpeechMonitor:
             _coerce_ms(self.audio_config.get('vad_silence_ms'), 1000)
         ))
         self.partial_activity_ms = max(0, _coerce_ms(self.audio_config.get('partial_activity_ms'), 800))
+        # Change 6, optional sub-fix: require the partial to *grow* (strictly
+        # longer text) to count as recent activity, since noise-driven partials
+        # tend to churn in place. Default off -> any partial change counts.
+        self.partial_require_growth = bool(self.audio_config.get('partial_require_growth', False))
         self.daf_max_active_ms = max(0, _coerce_ms(self.audio_config.get('daf_max_active_ms'), 5000))
         self.daf_activation_squelch_ms = max(0, _coerce_ms(self.audio_config.get('daf_activation_squelch_ms'), 300))
         self.webrtc_vad_config = self.audio_config.get('webrtc_vad', {})
@@ -166,9 +170,18 @@ class SpeechMonitor:
         self._last_vad_speech_ms = 0.0
         self._last_vad_silence_ms = 0.0
         self._last_daf_on_time_ms = 0.0
+
+        # DAF host<->ESP reconcile (Change 6, Fix 1): a dropped serial command at
+        # release/activation time can leave the ESP latched while the host thinks
+        # it toggled, with nothing to retry. These drive a rate-limited,
+        # two-consecutive-mismatch reconcile loop.
+        self._last_reconcile_ms = 0.0
+        self._reconcile_interval_ms = 500
+        self._reconcile_mismatch_count = 0
         
         # ASR monitoring
         self.last_partial_update_time = 0
+        self._last_partial_growth_time = 0  # Change 6 optional sub-fix (partial growth)
         self.asr_stuck_threshold_ms = 5000  # 5 seconds without updates
         
         # Performance tracking
@@ -414,16 +427,29 @@ class SpeechMonitor:
                     utils.log_audio_status("WebRTC VAD requested but dependency not available; using RMS fallback")
                 else:
                     try:
+                        onset_ratio = self.webrtc_vad_config.get('onset_ratio')
+                        offset_ratio = self.webrtc_vad_config.get('offset_ratio')
                         vad_config = WebRTCVADConfig(
                             sample_rate=self.audio_config['sample_rate'],
                             frame_ms=self.audio_config['frame_ms'],
                             aggressiveness=int(self.webrtc_vad_config.get('aggressiveness', 2)),
                             activation_frames=int(self.webrtc_vad_config.get('activation_frames', 3)),
                             release_frames=int(self.webrtc_vad_config.get('release_frames', 5)),
+                            energy_gate_enabled=bool(self.webrtc_vad_config.get('energy_gate_enabled', False)),
+                            onset_ratio=float(onset_ratio) if onset_ratio is not None else None,
+                            offset_ratio=float(offset_ratio) if offset_ratio is not None else None,
+                            floor_alpha_rise=float(self.webrtc_vad_config.get('floor_alpha_rise', 0.02)),
+                            floor_alpha_fall=float(self.webrtc_vad_config.get('floor_alpha_fall', 0.10)),
+                            floor_init_seconds=float(self.webrtc_vad_config.get('floor_init_seconds', 1.0)),
                         )
                         self.vad_tracker = WebRTCVAD(vad_config)
+                        gate_desc = (
+                            f"gate on onset={vad_config.onset_ratio} offset={vad_config.offset_ratio}"
+                            if vad_config.energy_gate_enabled
+                            else "gate off"
+                        )
                         utils.log_audio_status(
-                            f"WebRTC VAD initialized (aggr={vad_config.aggressiveness}, frame={vad_config.frame_ms}ms)"
+                            f"WebRTC VAD initialized (aggr={vad_config.aggressiveness}, frame={vad_config.frame_ms}ms, {gate_desc})"
                         )
                     except Exception as exc:
                         utils.log_error("Failed to initialize WebRTC VAD", exc)
@@ -636,6 +662,13 @@ class SpeechMonitor:
                 if not presence_active:
                     return
 
+                # Reconcile host<->ESP DAF state (Change 6, Fix 1). Runs before the
+                # skip-heavy return so a dropped off-command is still corrected while
+                # the wearer is idle. Skipped during prompt playback (DAF is off and
+                # the ESP is busy with the prompt).
+                if not self.prompt_active:
+                    self._reconcile_daf_state(current_time)
+
             # Skip heavy processing when we're clearly idle (no recent partials or voice activity).
             last_voice_ms = self.audio_io.get_last_voice_time_ms() if self.audio_io else 0
             recent_voice = last_voice_ms and (current_time - last_voice_ms) < 200
@@ -643,6 +676,8 @@ class SpeechMonitor:
             # Get current partial text (always available)
             current_partial = self.asr.get_current_partial()
             if current_partial != self.partial_text:
+                if len(current_partial) > len(self.partial_text):
+                    self._last_partial_growth_time = current_time
                 self.partial_text = current_partial
                 self.last_partial_update_time = current_time
                 # Log when partial text changes (only non-empty for signal)
@@ -750,10 +785,18 @@ class SpeechMonitor:
                 elapsed_ms = self.state.elapsed_ms() if self.daf_max_active_ms > 0 else 0
 
                 speech_recent = self._speech_recent(current_time)
-                partial_recent = (
-                    self.last_partial_update_time > 0
-                    and (current_time - self.last_partial_update_time) <= self.partial_activity_ms
-                )
+                if self.partial_require_growth:
+                    # Only strictly-growing partials hold the latch; churn in
+                    # place (typical of noise) reads as inactivity.
+                    partial_recent = (
+                        self._last_partial_growth_time > 0
+                        and (current_time - self._last_partial_growth_time) <= self.partial_activity_ms
+                    )
+                else:
+                    partial_recent = (
+                        self.last_partial_update_time > 0
+                        and (current_time - self.last_partial_update_time) <= self.partial_activity_ms
+                    )
 
                 if self.daf_max_active_ms > 0 and elapsed_ms >= self.daf_max_active_ms:
                     self.state.off()
@@ -886,6 +929,39 @@ class SpeechMonitor:
         if state_changed:
             utils.log_daf_transition(active, reason)
 
+    def _reconcile_daf_state(self, current_time: float) -> None:
+        """Re-assert the ESP DAF state when it disagrees with host state.
+
+        A single dropped serial command at release (or activation) time can leave
+        the ESP latched on while the host believes DAF is off (or vice versa),
+        with nothing to retry it (Change 6, Fix 1). This converts the one-shot
+        write into an eventually-consistent loop: rate-limited to
+        ``_reconcile_interval_ms`` and requiring the same mismatch on two
+        consecutive checks so it never flaps against a slow ESP state report.
+        """
+        if (current_time - self._last_reconcile_ms) < self._reconcile_interval_ms:
+            return
+        self._last_reconcile_ms = current_time
+
+        host_active = bool(self.state and self.state.is_active())
+        with self._remote_state_lock:
+            remote_active = self.remote_daf_state
+
+        if host_active == remote_active:
+            self._reconcile_mismatch_count = 0
+            return
+
+        # Mismatch: require two consecutive observations before acting so a
+        # momentarily-stale ESP report doesn't provoke a spurious re-send.
+        self._reconcile_mismatch_count += 1
+        if self._reconcile_mismatch_count < 2:
+            return
+        self._reconcile_mismatch_count = 0
+
+        # _apply_daf_transition re-reads remote state and only writes on a real
+        # mismatch, so this re-sends disable_daf()/enable_daf() as needed and logs.
+        self._apply_daf_transition(host_active, "reconcile")
+
     def _handle_esp_state_update(self, active: bool) -> None:
         with self._remote_state_lock:
             previous = self.remote_daf_state
@@ -920,6 +996,7 @@ class SpeechMonitor:
         self._last_hit_log_ms = 0
         self._last_daf_on_time_ms = 0
         self.last_partial_update_time = 0
+        self._last_partial_growth_time = 0
 
         if self.asr:
             self.asr.reset()

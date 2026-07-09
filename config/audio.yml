@@ -18,11 +18,22 @@ speech_release_ms: 750
 partial_activity_ms: 800
 daf_max_active_ms: 0
 daf_activation_squelch_ms: 300
+partial_require_growth: false   # Change 6 sub-fix: require growing partials to hold the DAF latch
 webrtc_vad:
   enabled: true
   aggressiveness: 2
   activation_frames: 3
   release_frames: 5
+  # Adaptive energy gate (Change 6, ported from Mediate's live-validated Change 1).
+  # Off by default -> release-path VAD behaves byte-identically to before.
+  # Enable after a bench check; Predict's mic/gain differ from Mediate's so the
+  # ratios transfer but expect to tune +/-1 against Predict's actual gain.
+  energy_gate_enabled: true
+  onset_ratio: 3.0        # RMS must clear floor*onset while idle to count as speech
+  offset_ratio: 2.0       # lower threshold while active, for hysteresis
+  floor_alpha_rise: 0.02  # slow rise: loud bursts don't drag the floor up fast
+  floor_alpha_fall: 0.10  # fast fall: floor tracks the room down quickly
+  floor_init_seconds: 1.0 # audio used to seed the floor before the gate arms
 esp_serial_port: /dev/gradi-esp-predict    # udev alias; override to /dev/ttyACM* if needed
 esp_serial_baud: 921600
 esp_chunk_samples: 1024
