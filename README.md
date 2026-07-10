@@ -33,12 +33,17 @@ Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, dete
 - Korean ASR: `models/asr/vosk-model-small-ko-0.22/`
 - English horizon LLM: `models/llm/llama-3.2-1b-q4_k_m.gguf`
 - Korean horizon LLM: `models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf`
-- Adjust paths in the keyword configs if you store checkpoints elsewhere.
+- Semantic scorer (optional, Change 3): `all-MiniLM-L6-v2` via `fastembed`, cached under `models/embed/` (≈25 MB). Downloaded automatically on first run; **warm the cache while online** (running `scripts/semantic_eval.py` does this) so an offline installation loads it from cache. Disabled by default — no download needed until you enable it.
+- Adjust `horizon.model_path` in the scenario config if you store checkpoints elsewhere.
 
 ## Configuration Overview
-- `config/audio.yml`: audio transport, VAD, DAF timing, ESP32 serial port.
-- `config/keywords_<lang>.yml`: baseline sensitive stems, numeric stem handling, llama.cpp parameters.
-- `config/topics_<lang>.yml`: optional topic rotation definitions (id, prompt asset, per-topic stems). Missing files fall back to the keyword list.
+- `config/audio.yml`: audio transport, VAD (incl. the release-path energy gate), DAF timing, ESP32 serial port.
+- `config/scenarios_<lang>.yml`: the consolidated scenario config (replaces the old `keywords_<lang>.yml` + `topics_<lang>.yml` split). Sections:
+  - `horizon`: llama.cpp predictor settings (model path, gpu layers, token limits, prompt template).
+  - `detection`: numeric follow-up handling (`numeric_scan_window`, `numeric_sensitive_stems`).
+  - `semantic`: embedding scenario scorer — `enabled` (ships `false`), `model_name`, `cache_dir`.
+  - `scenarios`: prompt round-robin; each has `id`, `prompt` asset, `mode` (`stems`|`semantic`|`both`), `stems`, and an optional per-scenario `semantic` block (`threshold`, `consecutive_hits`, `exemplars`, `contrast`).
+- **Deprecation fallback**: if `scenarios_<lang>.yml` is absent, the host still boots by loading the legacy `keywords_<lang>.yml` + `topics_<lang>.yml` pair (logged as a deprecation warning).
 - Launch options: `--logging` upgrades Loguru to INFO, `--cpu-only` disables GPU offload, `--port` overrides `esp_serial_port`.
 - Example run commands:
   ```bash
@@ -47,15 +52,17 @@ Desktop orchestrator + ESP32-S3 firmware for provoking topic-guided speech, dete
   ```
 
 ## Topic Design
-- Each topic entry sets `language`, `asset`, and `stems`; ensure the asset string matches a prompt header compiled into the firmware.
-- Keep stems short enough to capture variants (e.g., “trump”, “도널드 트럼프”) while avoiding overly generic hits.
-- Numeric-sensitive stems live in the keyword config; per-topic overrides are optional. The host watches the matched stem window for digits to catch account numbers or PINs.
+- Each scenario sets `language`, `asset`, `mode`, and `stems`; ensure the asset string matches a prompt header compiled into the firmware.
+- **Stems** are the zero-latency fast path (Aho-Corasick substring match). The detector has **no word boundaries**, so avoid bare stems under 5 characters (e.g. use `ai will`, not `ai`) — a short stem matches inside unrelated words.
+- **Semantic** (`mode: semantic` or `both`) scores meaning against per-scenario `exemplars` minus `contrast` (hedging/filler) in embedding space, catching paraphrase the stems miss. It runs on a dedicated worker thread and adds no trigger latency. Both production scenarios run `both`.
+- Tune scenarios offline with `python scripts/semantic_eval.py` (labeled utterance sets + stem-safety check). Edit `exemplars`/`threshold`/`contrast` in YAML and re-run — no training, no external services. Bias thresholds toward triggering (sensitivity over discrimination).
+- Numeric-sensitive stems live in `detection`; per-scenario overrides are optional. The host watches the matched stem window for digits to catch account numbers or PINs.
 
 ## Troubleshooting
 - **Serial unavailable**: confirm `/dev/gradi-esp-predict` (or the matching `/dev/ttyACM*` device) exists, ensure dialout group membership, and match baud to `audio.yml`.
 - **No audio**: verify the ESP32 sketch is running, topic prompts compiled, and radar presence reported as active.
 - **sounddevice errors**: install PortAudio or stay in ESP serial mode.
-- **Large model downloads**: preload `models/` manually; the repo does not ship checkpoints.
+- **Large model downloads**: preload `models/` manually; the repo does not ship checkpoints. If the semantic scorer is enabled, warm its cache while online first (`scripts/semantic_eval.py`) — an offline PC with an empty `models/embed/` disables semantic scoring and falls back to stems (logged), it does not crash.
 
 ## Repository Map
 ```

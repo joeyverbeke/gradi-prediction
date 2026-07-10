@@ -1,0 +1,226 @@
+# Gradi Predict — consolidated scenario config (Change 3).
+# Replaces the old keywords_en.yml + topics_en.yml split.
+#   horizon:   llama.cpp predictor settings (was keywords_en.yml tail)
+#   detection: numeric follow-up handling (was keywords_en.yml)
+#   semantic:  embedding scenario scorer — ships DARK (enabled: false)
+#   scenarios: prompt round-robin; each carries stems + optional semantic exemplars
+
+horizon:
+  model_path: models/llm/llama-3.2-1b-q4_k_m.gguf
+  gpu_layers: -1
+  context_tokens: 96
+  min_pred_tokens: 3
+  max_pred_tokens: 5
+  top_k: 20
+  prompt_template: "{context}"
+
+detection:
+  numeric_scan_window: 12
+  numeric_sensitive_stems:
+    - passw
+    - credit card
+    - secret
+    - confid
+    - ssn
+    - social secur
+    - bank rout
+    - pin number
+    - account numb
+    - security code
+    - cvv
+    - expir
+
+semantic:
+  enabled: true                                       # ship dark; flip on live after bench check
+  model_name: sentence-transformers/all-MiniLM-L6-v2   # fastembed id (int8 ONNX under the hood)
+  cache_dir: models/embed                              # co-located cache -> loads offline
+
+scenarios:
+  - id: politics
+    prompt:
+      language: "EN"
+      asset: "POLITICS"
+    mode: both                                         # stems | semantic | both
+    stems:
+      - politics
+      - american politics
+      - united states
+      - u.s. politics
+      - election
+      - elections
+      - voter
+      - vote
+      - ballot
+      - electoral college
+      - primary
+      - caucus
+      - midterms
+      - midterm
+      - campaign
+      - political campaign
+      - debate
+      - poll numbers
+      - approval rating
+      - donald trump
+      - trump
+      - joe biden
+      - biden
+      - kamala harris
+      - harris
+      - ron desantis
+      - desantis
+      - gavin newsom
+      - newsom
+      - republican
+      - republican party
+      - democrat
+      - democratic party
+      - conservative
+      - liberal
+      - progressive
+      - far right
+      - far left
+      - fascism
+      - authoritarian
+      - dictatorship
+      - congress
+      - senate
+      - house of representatives
+      - speaker of the house
+      - white house
+      - supreme court
+      - chief justice
+      - federal judge
+      - impeachment
+      - indictment
+      - arraignment
+      - trial
+      - guilty verdict
+      - not guilty
+      - capitol riot
+      - january 6
+      - policy
+      - immigration
+      - border security
+      - abortion
+      - gun control
+      - second amendment
+      - taxes
+      - economy
+      - inflation
+      - unemployment
+      - jobs report
+      - foreign policy
+      - national security
+      - defense spending
+      - nato
+      - alliance
+      - sanctions
+      - ukraine
+      - russia
+      - china
+      - israel
+      - gaza
+      - palestine
+      - collapse
+      - collapsing
+      - powerful
+      - power grab
+      - corruption
+      - scandal
+      - whistleblower
+    semantic:
+      threshold: 0.10                                  # eval-derived (margin form; hesitation sits <= -0.03)
+      consecutive_hits: 2
+      # Stem-free openings of political speech — score high the moment an opinion begins.
+      exemplars:
+        - "i think this country is heading in the wrong direction"
+        - "the government should stay out of it"
+        - "i don't trust politicians anymore"
+        - "our democracy is under threat"
+        - "both parties are the same"
+        - "the people in charge don't care about us"
+        - "everything is so divided right now"
+        - "i'm worried about where things are going politically"
+        - "the whole political system feels broken"
+        - "our leaders don't represent regular people"
+        - "the country feels more divided every year"
+        - "i've completely lost faith in the government"
+        - "the people in power only look out for themselves"
+        - "this administration has been a disaster"
+        - "the two party system is failing all of us"
+        - "there is so much corruption in washington"
+      contrast:
+        - "um let me think"
+        - "that's a big question"
+        - "i don't really follow politics"
+        - "i'm not sure what to say"
+        - "what do you want me to say"
+
+  - id: ai_future
+    prompt:
+      language: "EN"
+      asset: "AIFUTURE"
+    mode: both
+    # Future-tense commitment constructions fire at the instant of commitment,
+    # before the vision's content is spoken. NO bare stems under 5 chars (the
+    # Aho-Corasick detector matches substrings with no word boundaries).
+    stems:
+      - ai will
+      - ai is going
+      - it will
+      - it's going to
+      - its going to
+      - we're going to
+      - were going to
+      - going to be
+      - will be
+      - in the future
+      - one day
+      - eventually
+      - artificial intelligence
+      - robots will
+      - machines will
+      - technology will
+      - take our jobs
+      - take over
+      - replace us
+      - cure
+      - solve
+      - singularity
+      - superintelligen
+      - utopia
+      - dystopia
+    semantic:
+      threshold: 0.06                                  # eval-derived, sensitive end (both valences unsayable)
+      consecutive_hits: 2
+      # Exemplars deliberately span BOTH valences so the margin fires on any
+      # committed future-vision and stays quiet on hesitation.
+      exemplars:
+        # positive
+        - "ai will cure diseases and solve climate change"
+        - "it's going to make everyone's life so much easier"
+        - "everyone will have a personal assistant that knows them"
+        - "it will free us from boring work"
+        - "ai will help us discover things we never could alone"
+        - "the future with ai is going to be amazing"
+        - "this technology is going to make life so much better"
+        - "we'll be able to solve problems we never could before"
+        - "it will unlock discoveries we can't even imagine yet"
+        # negative
+        - "ai is going to take everyone's jobs"
+        - "it will be used to watch and control us"
+        - "machines will replace real human connection"
+        - "i think it could end up destroying us"
+        - "nobody will be able to tell what's real anymore"
+        - "the rich will own the ai and everyone else loses"
+        - "we're giving up way too much control to these systems"
+        - "it's going to strip away all of our privacy"
+        - "people are going to lose their sense of purpose"
+      contrast:
+        - "um i'm not really sure"
+        - "that's a hard question"
+        - "i don't know much about ai"
+        - "let me think about that for a second"
+        - "i haven't really thought about it"
+        - "what kind of thoughts do you mean"

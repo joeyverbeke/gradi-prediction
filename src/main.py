@@ -14,7 +14,7 @@ import queue
 import numpy as np
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
 try:
@@ -22,6 +22,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     WebRTCVAD = None  # type: ignore
     WebRTCVADConfig = None  # type: ignore
+
+try:
+    from detector_semantic import SemanticDetector  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    SemanticDetector = None  # type: ignore
 
 # Local imports
 from daf_ring import DAFRing
@@ -46,6 +51,8 @@ class TopicDefinition:
     prompt_asset: str
     stems: List[str]
     numeric_stems: List[str]
+    mode: str = "stems"                    # stems | semantic | both (Change 3)
+    semantic: dict = field(default_factory=dict)  # {threshold, consecutive_hits, exemplars, contrast}
 
 
 class SpeechMonitor:
@@ -78,32 +85,22 @@ class SpeechMonitor:
         if self.serial_port_override:
             normalized_port = self._normalize_serial_port(self.serial_port_override)
             self.audio_config['esp_serial_port'] = normalized_port
-        keywords_filename = f"keywords_{self.language}.yml"
-        self.keywords_config = self._load_config(keywords_filename)
+        # Consolidated scenario config (Change 3): one scenarios_<lang>.yml with a
+        # deprecation fallback to the legacy keywords_<lang>.yml + topics_<lang>.yml
+        # pair, so a config rename can never stop the installation from booting.
+        (
+            self.horizon_config,
+            self.detection_config,
+            self.semantic_config,
+            self.topic_definitions,
+        ) = self._load_language_config()
+
         self.default_numeric_sensitive_stems = {
             stem.lower()
-            for stem in self.keywords_config.get("numeric_sensitive_stems", [])
+            for stem in self.detection_config.get("numeric_sensitive_stems", [])
         }
         self.numeric_sensitive_stems = set(self.default_numeric_sensitive_stems)
-        topics_filename = f"topics_{self.language}.yml"
-        try:
-            topics_config = self._load_config(topics_filename)
-        except RuntimeError:
-            topics_config = {}
 
-        self.topic_definitions = self._parse_topics_config(topics_config)
-        if not self.topic_definitions:
-            fallback_stems = self.keywords_config.get('stems', [])
-            if not fallback_stems:
-                raise RuntimeError(f"No topics defined in {topics_filename} and no fallback stems available")
-            fallback_topic = TopicDefinition(
-                id="default",
-                prompt_language=self.language.upper(),
-                prompt_asset="",
-                stems=fallback_stems,
-                numeric_stems=list(self.default_numeric_sensitive_stems),
-            )
-            self.topic_definitions = [fallback_topic]
         self.topic_detectors: Dict[str, KeywordDetector] = {}
         for topic in self.topic_definitions:
             self.topic_detectors[topic.id] = KeywordDetector.from_config(topic.stems)
@@ -117,8 +114,11 @@ class SpeechMonitor:
         self.prompt_active = False
         self.numeric_scan_window = max(
             0,
-            int(self.keywords_config.get("numeric_scan_window", 12))
+            int(self.detection_config.get("numeric_scan_window", 12))
         )
+        # Semantic scorer is built later in initialize(); config flag read here.
+        self.semantic_detector = None
+        self.semantic_enabled = bool(self.semantic_config.get("enabled", False))
         self.latch_until_silence = bool(self.audio_config.get('daf_latch_until_silence', True))
 
         def _coerce_ms(value, default):
@@ -157,15 +157,24 @@ class SpeechMonitor:
         self.partial_text = ""
         self.horizon_text = ""
         self.last_partial_length = 0
-        self.trigger_ring = deque(maxlen=6)  # Last 6 trigger results
+        self.trigger_ring = deque(maxlen=6)  # Last 6 stem trigger results
         self.last_llm_call_time = 0
         self.llm_call_interval_ms = 100
-        self._last_hit_state = (False, False)
+        self._last_hit_state = (False, False, False)  # (asr, llm, semantic)
         self._last_hit_log_ms = 0
         self._last_horizon_logged = ""
         self._llm_executor: Optional[ThreadPoolExecutor] = None
         self._llm_future: Optional[Future] = None
         self._llm_lock = threading.Lock()
+
+        # Semantic scorer (Change 3): dedicated single-worker executor (never
+        # shared with the horizon's), async-produce / inline-consume, own ring.
+        self._semantic_executor: Optional[ThreadPoolExecutor] = None
+        self._semantic_future: Optional[Future] = None
+        self._semantic_scores: Dict[str, float] = {}   # scenario_id -> latest margin score
+        self._semantic_input_key = None                # last (partial_tail, horizon) submitted
+        self._last_semantic_job_ms = 0.0
+        self.semantic_ring = deque(maxlen=6)
         self._vad_lock = threading.Lock()
         self._last_vad_speech_ms = 0.0
         self._last_vad_silence_ms = 0.0
@@ -208,13 +217,87 @@ class SpeechMonitor:
         except Exception as e:
             raise RuntimeError(f"Failed to load config {config_path}: {e}")
 
-    def _parse_topics_config(self, config: dict) -> List[TopicDefinition]:
+    def _load_language_config(self):
+        """Load the consolidated scenarios_<lang>.yml, or fall back to the legacy
+        keywords_<lang>.yml + topics_<lang>.yml pair (Change 3).
+
+        Returns ``(horizon_config, detection_config, semantic_config, topics)``.
+        """
+        scenarios_filename = f"scenarios_{self.language}.yml"
+        scenarios_path = os.path.join(self.config_dir, scenarios_filename)
+        if os.path.exists(scenarios_path):
+            cfg = self._load_config(scenarios_filename) or {}
+            horizon = dict(cfg.get("horizon") or {})
+            detection = dict(cfg.get("detection") or {})
+            semantic = dict(cfg.get("semantic") or {})
+            topics = self._parse_topics(cfg.get("scenarios") or [])
+            if not topics:
+                # Consolidated world: no silent fallback to a stale stem list.
+                raise RuntimeError(f"{scenarios_filename} defines no scenarios")
+            return horizon, detection, semantic, topics
+
+        # --- Deprecation fallback: legacy two-file config ---
+        utils.log_audio_status(
+            f"[deprecation] {scenarios_filename} not found; loading legacy "
+            f"keywords_{self.language}.yml + topics_{self.language}.yml"
+        )
+        return self._load_legacy_config()
+
+    def _load_legacy_config(self):
+        """Load the old keywords_/topics_ pair and normalize it to the new shape."""
+        keywords_filename = f"keywords_{self.language}.yml"
+        kw = self._load_config(keywords_filename) or {}
+        topics_filename = f"topics_{self.language}.yml"
+        try:
+            topics_config = self._load_config(topics_filename) or {}
+        except RuntimeError:
+            topics_config = {}
+
+        horizon = {
+            "model_path": kw.get("llm_model_path", "models/llm/llama-3.2-1b-q4_k_m.gguf"),
+            "gpu_layers": kw.get("llm_gpu_layers"),
+            "context_tokens": kw.get("context_tokens", 96),
+            "min_pred_tokens": kw.get("min_pred_tokens", 3),
+            "max_pred_tokens": kw.get("max_pred_tokens", 5),
+            "top_k": kw.get("top_k", 20),
+            "prompt_template": kw.get("prompt_template", "{context}"),
+        }
+        detection = {
+            "numeric_scan_window": kw.get("numeric_scan_window", 12),
+            "numeric_sensitive_stems": kw.get("numeric_sensitive_stems", []),
+        }
+        semantic = {"enabled": False}
+
+        topics = self._parse_topics(topics_config.get("topics", []))
+        if not topics:
+            # Preserve the legacy fallback-to-keyword-stems behavior (this path
+            # only runs for old configs, so it must boot identically to before).
+            fallback_stems = kw.get("stems", [])
+            if not fallback_stems:
+                raise RuntimeError(
+                    f"No topics in {topics_filename} and no fallback stems in {keywords_filename}"
+                )
+            topics = [
+                TopicDefinition(
+                    id="default",
+                    prompt_language=self.language.upper(),
+                    prompt_asset="",
+                    stems=fallback_stems,
+                    numeric_stems=[
+                        s.lower() for s in detection["numeric_sensitive_stems"]
+                    ],
+                    mode="stems",
+                )
+            ]
+        return horizon, detection, semantic, topics
+
+    def _parse_topics(self, raw_entries) -> List[TopicDefinition]:
+        """Parse a list of scenario/topic entries into TopicDefinitions."""
         topics: List[TopicDefinition] = []
-        if not config:
+        if not raw_entries:
             return topics
 
-        raw_topics = config.get("topics", [])
-        for entry in raw_topics:
+        for entry in raw_entries:
             if not isinstance(entry, dict):
                 continue
 
@@ -226,15 +309,23 @@ class SpeechMonitor:
             language = str(prompt_cfg.get("language", self.language)).strip().upper()
             asset = str(prompt_cfg.get("asset", "")).strip().upper()
             if not asset:
-                raise ValueError(f"Topic '{topic_id}' missing prompt asset")
+                raise ValueError(f"Scenario '{topic_id}' missing prompt asset")
+
+            mode = str(entry.get("mode", "stems")).strip().lower() or "stems"
+            if mode not in ("stems", "semantic", "both"):
+                raise ValueError(f"Scenario '{topic_id}' has invalid mode '{mode}'")
 
             raw_stems = entry.get("stems", [])
             stems = [str(stem).strip() for stem in raw_stems if str(stem).strip()]
-            if not stems:
-                raise ValueError(f"Topic '{topic_id}' must define at least one stem")
+            if not stems and mode != "semantic":
+                raise ValueError(
+                    f"Scenario '{topic_id}' must define at least one stem (mode={mode})"
+                )
 
             raw_numeric = entry.get("numeric_sensitive_stems", [])
             numeric_stems = [str(stem).strip().lower() for stem in raw_numeric if str(stem).strip()]
+
+            semantic_cfg = entry.get("semantic", {}) or {}
 
             topics.append(
                 TopicDefinition(
@@ -243,10 +334,150 @@ class SpeechMonitor:
                     prompt_asset=asset,
                     stems=stems,
                     numeric_stems=numeric_stems,
+                    mode=mode,
+                    semantic=semantic_cfg,
                 )
             )
 
         return topics
+
+    def _init_semantic_detector(self) -> None:
+        """Build the semantic scorer if enabled. Degrades to stems on any failure.
+
+        This never raises: a missing model cache (e.g. an offline PC that was never
+        warmed) or a bad fastembed install disables semantic scoring and logs it,
+        rather than stopping the installation from booting.
+        """
+        self.semantic_detector = None
+        self.semantic_enabled = bool(self.semantic_config.get("enabled", False))
+        if not self.semantic_enabled:
+            return
+        if SemanticDetector is None:
+            utils.log_audio_status(
+                "Semantic enabled but detector dependency unavailable; using stems only"
+            )
+            self.semantic_enabled = False
+            return
+        try:
+            scenarios_for_semantic = [
+                {
+                    "id": t.id,
+                    "exemplars": t.semantic.get("exemplars", []),
+                    "contrast": t.semantic.get("contrast", []),
+                }
+                for t in self.topic_definitions
+                if t.mode in ("semantic", "both") and t.semantic.get("exemplars")
+            ]
+            if not scenarios_for_semantic:
+                utils.log_audio_status(
+                    "Semantic enabled but no scenarios have exemplars; using stems only"
+                )
+                self.semantic_enabled = False
+                return
+            self.semantic_detector = SemanticDetector(
+                scenarios_for_semantic,
+                model_name=self.semantic_config.get(
+                    "model_name", "sentence-transformers/all-MiniLM-L6-v2"
+                ),
+                cache_dir=self.semantic_config.get("cache_dir", "models/embed"),
+            )
+            if not self._semantic_executor:
+                self._semantic_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="semantic"
+                )
+            utils.log_audio_status(
+                f"Semantic detector initialized "
+                f"({[s['id'] for s in scenarios_for_semantic]}, "
+                f"model={self.semantic_config.get('model_name')})"
+            )
+        except Exception as exc:
+            utils.log_error("Failed to initialize semantic detector; falling back to stems", exc)
+            self.semantic_detector = None
+            self.semantic_enabled = False
+
+    def _active_topic(self) -> Optional[TopicDefinition]:
+        """The scenario currently in play (or the first, before any rotation)."""
+        if self.current_topic is not None:
+            return self.current_topic
+        return self.topic_definitions[0] if self.topic_definitions else None
+
+    def _semantic_job(self, partial_tail: str, horizon_text: str):
+        """Worker-thread job: embed both strings, return per-scenario max margin."""
+        t0 = time.perf_counter()
+        combined: Dict[str, float] = {}
+        for text in (partial_tail, horizon_text):
+            if not text:
+                continue
+            for sid, val in self.semantic_detector.score(text).items():
+                combined[sid] = max(combined.get(sid, float("-inf")), val)
+        wall_ms = (time.perf_counter() - t0) * 1000.0
+        return combined, wall_ms
+
+    def _update_semantic_scores(self, partial_tail: str, active_id: str) -> Optional[float]:
+        """Async-produce / inline-consume: harvest the last job, submit a fresh one
+        when the scored text changed, and return the cached score for the active
+        scenario. Inline cost is a dict lookup."""
+        if not self.semantic_detector or not self._semantic_executor:
+            return None
+
+        # Harvest a completed job into the cache.
+        if self._semantic_future is not None and self._semantic_future.done():
+            try:
+                scores, wall_ms = self._semantic_future.result()
+                self._semantic_scores = scores
+                self._last_semantic_job_ms = wall_ms
+                if self.debug_mode:
+                    utils.log_audio_status(
+                        f"Semantic scored in {wall_ms:.1f}ms: "
+                        f"{ {k: round(v, 3) for k, v in scores.items()} }"
+                    )
+            except Exception as exc:
+                utils.log_error("Semantic scoring error", exc)
+            finally:
+                self._semantic_future = None
+
+        # Decay-on-empty (retrigger audit, Fix 2): in silence (no partial and no
+        # horizon) zero the semantic signal instead of holding the last score.
+        # This matches stem semantics — the score describes the text currently on
+        # the table, not the last text seen — and stops a stale high score from
+        # re-triggering DAF after release.
+        horizon_text = self.horizon_text or ""
+        if not partial_tail and not horizon_text:
+            self._semantic_scores = {}
+            self._semantic_input_key = None
+            return None
+
+        # Submit a new job when inputs changed and none is in flight.
+        key = (partial_tail, horizon_text)
+        if self._semantic_future is None and key != self._semantic_input_key:
+            self._semantic_input_key = key
+            self._semantic_future = self._semantic_executor.submit(
+                self._semantic_job, partial_tail, horizon_text
+            )
+
+        return self._semantic_scores.get(active_id)
+
+    def _reset_semantic_state(self) -> None:
+        """Clear the semantic ring and score cache together.
+
+        Called from both the DAF-off and presence-suspend paths so a stale high
+        score can never re-trigger DAF after release (retrigger audit, Fix 1).
+        """
+        self.semantic_ring.clear()
+        self._semantic_scores = {}
+        self._semantic_input_key = None
+
+    def _update_semantic_ring(self, hit: bool) -> None:
+        self.semantic_ring.append(hit)
+
+    def _check_semantic_trigger(self, active_topic: TopicDefinition) -> bool:
+        """Semantic trigger fires after per-scenario consecutive semantic hits."""
+        n = int(active_topic.semantic.get("consecutive_hits", 2))
+        if n < 1:
+            n = 1
+        if len(self.semantic_ring) < n:
+            return False
+        return all(list(self.semantic_ring)[-n:])
 
     def _select_next_topic(self) -> TopicDefinition:
         if not self.topic_definitions:
@@ -471,24 +702,27 @@ class SpeechMonitor:
                 sample_rate=self.audio_config['sample_rate']
             )
             
-            # Initialize LLM predictor
-            n_gpu_layers = self.keywords_config.get('llm_gpu_layers')
+            # Initialize LLM predictor (horizon settings, consolidated config)
+            n_gpu_layers = self.horizon_config.get('gpu_layers')
             if self.force_cpu:
                 utils.log_audio_status("CPU-only mode requested; llama.cpp will run on CPU")
                 n_gpu_layers = 0
 
-            predictor_model_path = self.keywords_config.get(
-                'llm_model_path',
+            predictor_model_path = self.horizon_config.get(
+                'model_path',
                 'models/llm/llama-3.2-1b-q4_k_m.gguf'
             )
 
             self.predictor = PredictorLlamaCPP(
                 model_path=predictor_model_path,
-                context_tokens=self.keywords_config.get('context_tokens', 96),
+                context_tokens=self.horizon_config.get('context_tokens', 96),
                 n_gpu_layers=n_gpu_layers,
-                prompt_template=self.keywords_config.get('prompt_template', '{context}')
+                prompt_template=self.horizon_config.get('prompt_template', '{context}')
             )
-            
+
+            # Initialize semantic scenario scorer (Change 3) — optional, ships dark.
+            self._init_semantic_detector()
+
             # Initialize DAF state
             self.state = DAFState(
                 hold_ms=self.audio_config['hold_ms']
@@ -639,6 +873,7 @@ class SpeechMonitor:
             self.trigger_ring.clear()
         except Exception:
             self.trigger_ring = deque(maxlen=6)
+        self._reset_semantic_state()
         self.horizon_text = ""
         self._last_horizon_logged = ""
 
@@ -731,9 +966,9 @@ class SpeechMonitor:
                 if rolling_text and not self._llm_future:
                     # Call LLM predictor
                     params = {
-                        'min_pred_tokens': self.keywords_config['min_pred_tokens'],
-                        'max_pred_tokens': self.keywords_config['max_pred_tokens'],
-                        'top_k': self.keywords_config['top_k']
+                        'min_pred_tokens': self.horizon_config.get('min_pred_tokens', 3),
+                        'max_pred_tokens': self.horizon_config.get('max_pred_tokens', 5),
+                        'top_k': self.horizon_config.get('top_k', 20)
                     }
                     
                     self._llm_future = self._llm_executor.submit(
@@ -751,7 +986,17 @@ class SpeechMonitor:
             if self.prompt_active:
                 return
 
-            # Scan for keywords and numeric follow-ups
+            active_topic = self._active_topic()
+            stem_mode = active_topic is None or active_topic.mode in ("stems", "both")
+            sem_mode = (
+                self.semantic_enabled
+                and self.semantic_detector is not None
+                and active_topic is not None
+                and active_topic.mode in ("semantic", "both")
+                and active_topic.id in self.semantic_detector.scenario_ids
+            )
+
+            # --- Stem path (Aho-Corasick + numeric follow-ups) ---
             matches_asr = self.detector.find_matches(partial_tail)
             matches_llm = self.detector.find_matches(self.horizon_text) if self.horizon_text else []
 
@@ -763,23 +1008,45 @@ class SpeechMonitor:
 
             if self._has_numeric_followup(self.horizon_text or "", matches_llm):
                 hit_llm = True
-            
-            # Log hit detection
-            hit_state = (hit_asr, hit_llm)
-            if hit_asr or hit_llm or hit_state != self._last_hit_state:
-                utils.log_hit_detection(hit_asr, hit_llm, partial_tail, self.horizon_text)
+
+            # --- Semantic path (async-produce / inline-consume; zero trigger latency) ---
+            semantic_score = None
+            hit_semantic = False
+            if sem_mode:
+                semantic_score = self._update_semantic_scores(partial_tail, active_topic.id)
+                if semantic_score is not None:
+                    threshold = float(active_topic.semantic.get("threshold", 0.30))
+                    hit_semantic = semantic_score >= threshold
+
+            # Log hit detection (include semantic scores where semantic is active)
+            hit_state = (hit_asr, hit_llm, hit_semantic)
+            if hit_asr or hit_llm or hit_semantic or hit_state != self._last_hit_state:
+                utils.log_hit_detection(
+                    hit_asr,
+                    hit_llm,
+                    partial_tail,
+                    self.horizon_text,
+                    semantic_scores=self._semantic_scores if sem_mode else None,
+                    active_scenario=active_topic.id if active_topic else None,
+                )
                 self._last_hit_log_ms = current_time
             self._last_hit_state = hit_state
-            
-            # Update trigger ring
-            hit = hit_asr or hit_llm
-            self._update_trigger_ring(hit)
-            
-            # Check trigger condition
-            if self._check_trigger_condition() and not self.state.is_active():
+
+            # Stem trigger ring (stems only; forced empty in semantic-only mode)
+            stem_hit = (hit_asr or hit_llm) if stem_mode else False
+            self._update_trigger_ring(stem_hit)
+
+            # Semantic trigger ring (its own ring + per-scenario consecutive_hits)
+            self._update_semantic_ring(hit_semantic)
+
+            # Check trigger condition (stem OR semantic → same DAF machinery)
+            stem_trigger = self._check_trigger_condition()
+            semantic_trigger = self._check_semantic_trigger(active_topic) if sem_mode else False
+            if (stem_trigger or semantic_trigger) and not self.state.is_active():
                 self.state.on()
                 self._last_daf_on_time_ms = current_time
-                self._apply_daf_transition(True, "Trigger condition met")
+                reason = "Trigger condition met" if stem_trigger else "Trigger condition met (semantic)"
+                self._apply_daf_transition(True, reason)
 
             if self.state.is_active():
                 elapsed_ms = self.state.elapsed_ms() if self.daf_max_active_ms > 0 else 0
@@ -874,6 +1141,10 @@ class SpeechMonitor:
             self._llm_executor.shutdown(wait=False)
             self._llm_executor = None
             self._llm_future = None
+        if self._semantic_executor:
+            self._semantic_executor.shutdown(wait=False)
+            self._semantic_executor = None
+            self._semantic_future = None
         
         # Stop ASR worker
         self.asr_running = False
@@ -992,7 +1263,8 @@ class SpeechMonitor:
         self.horizon_text = ""
         self._last_horizon_logged = ""
         self.trigger_ring.clear()
-        self._last_hit_state = (False, False)
+        self._reset_semantic_state()
+        self._last_hit_state = (False, False, False)
         self._last_hit_log_ms = 0
         self._last_daf_on_time_ms = 0
         self.last_partial_update_time = 0

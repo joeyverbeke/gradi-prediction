@@ -1,8 +1,44 @@
-topics:
+# Gradi Predict — consolidated scenario config (Korean, Change 3).
+# Structural migration of keywords_ko.yml + topics_ko.yml. Semantic scoring is
+# disabled (Korean exemplars wait for the multilingual-e5 swap); scenarios are
+# preserved unchanged so Korean behavior is identical to the old two-file setup.
+
+horizon:
+  model_path: models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf
+  gpu_layers: 4
+  context_tokens: 256
+  min_pred_tokens: 2
+  max_pred_tokens: 4
+  top_k: 30
+  prompt_template: "다음 문맥을 자연스럽게 이어서 한 문장으로 완성하세요: {context}"
+
+detection:
+  numeric_scan_window: 12
+  numeric_sensitive_stems:
+    - 비밀
+    - 패스워
+    - 암호
+    - 신용카드
+    - 카드번호
+    - 계좌번
+    - 계좌번호
+    - 주민등록
+    - 주민번
+    - 보안번
+    - 인증번호
+    - 생년월일
+
+semantic:
+  enabled: false                                       # Korean exemplars pending multilingual-e5-small
+  model_name: intfloat/multilingual-e5-small           # placeholder for the future ko swap
+  cache_dir: models/embed
+
+scenarios:
   - id: politics
     prompt:
       language: "KR"
       asset: "POLITICS"
+    mode: stems
     stems:
       - 정치 # politics
       - 미국 # United States
@@ -88,6 +124,7 @@ topics:
     prompt:
       language: "KR"
       asset: "BRAG"
+    mode: stems
     stems:
       - 자랑 # brag / boast
       - 허세 # showing off / swagger

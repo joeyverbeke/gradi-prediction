@@ -33,9 +33,18 @@ def log_horizon(horizon_text: str):
         logger.info(f"LLM Horizon: '{horizon_text}'")
 
 
-def log_hit_detection(hit_asr: bool, hit_llm: bool, partial_tail: str, horizon_text: str):
-    """Log hit detection results"""
-    logger.info(f"Hit Detection - ASR: {hit_asr}, LLM: {hit_llm}")
+def log_hit_detection(hit_asr: bool, hit_llm: bool, partial_tail: str, horizon_text: str,
+                      semantic_scores: dict = None, active_scenario: str = None):
+    """Log hit detection results.
+
+    semantic_scores/active_scenario (Change 3) are logged when semantic scoring is
+    active, so live JSONL shows *why* DAF fired and thresholds can be tuned from it.
+    """
+    sem_suffix = ""
+    if semantic_scores is not None:
+        rounded = {k: round(v, 3) for k, v in semantic_scores.items()}
+        sem_suffix = f", SEM[{active_scenario}]: {rounded}"
+    logger.info(f"Hit Detection - ASR: {hit_asr}, LLM: {hit_llm}{sem_suffix}")
     if hit_asr or hit_llm:
         logger.warning(f"RISK DETECTED - Partial tail: '{partial_tail}', Horizon: '{horizon_text}'")
 
